@@ -1,0 +1,401 @@
+@use '../styles/tokens' as *;
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+
+    // ── Smoke Monkey core surfaces (very dark neutral blue-gray) ──
+    --bg: 216 39% 5%;             // #070B10
+    --bg-elevated: 217 36% 6%;    // sidebar / elevated chrome
+    --surface-950: 216 39% 5%;
+    --surface-900: 216 35% 8%;    // #0D131D primary surface
+    --surface-850: 218 36% 10%;
+    --surface-800: 221 39% 11%;   // #111827 elevated surface
+    --surface-700: 215 28% 17%;
+    --surface-600: 215 25% 27%;
+
+    // Ink (text)
+    --ink-primary: 210 40% 98%;
+    --ink-secondary: 213 27% 65%;
+    --ink-muted: 215 20% 47%;
+
+    // Brand
+    --primary: 262 83% 58%;
+    --primary-hover: 258 90% 66%;
+    --primary-subtle: 262 83% 58% / 0.15;
+    --primary-foreground: 0 0% 100%;
+    --accent: 188 94% 43%;
+    --accent-hover: 189 86% 53%;
+    --accent-subtle: 188 94% 43% / 0.12;
+    --accent-foreground: 0 0% 100%;
+
+    // Semantic
+    --success: 142 71% 45%;
+    --success-subtle: 142 71% 45% / 0.12;
+    --warning: 38 92% 50%;
+    --warning-subtle: 38 92% 50% / 0.12;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --error-subtle: 0 84% 60% / 0.12;
+
+    // shadcn-ui aliases
+    --background: var(--bg);
+    --foreground: var(--ink-primary);
+    --border: 215 25% 18%;
+    --input: 215 25% 20%;
+    --ring: 262 83% 58%;
+    --secondary: 219 40% 11%;
+    --secondary-foreground: 213 27% 65%;
+    --muted: 219 40% 10%;
+    --muted-foreground: 215 20% 47%;
+    --popover: 216 35% 8%;
+    --popover-foreground: 210 40% 98%;
+    --card: 216 35% 8%;
+    --card-foreground: 210 40% 98%;
+
+    --radius: 12px;
+    --radius-card: 14px;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body {
+    height: 100%;
+    // Never allow content to push the page wider than the viewport. Anything
+    // that needs horizontal scrolling must do so in an internal scroll
+    // container (diagrams, tables, code blocks), never at page level.
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  body {
+    @apply bg-bg font-sans text-ink-primary antialiased;
+    text-rendering: optimizeLegibility;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  // ── Safe-area helpers for notched / home-indicator devices ──────────
+  @supports (padding: env(safe-area-inset-bottom)) {
+    .pb-safe {
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    .mb-safe {
+      margin-bottom: env(safe-area-inset-bottom);
+    }
+  }
+
+  ::selection {
+    background: hsla(262, 83%, 58%, 0.32);
+    color: #fff;
+  }
+
+  // ── Scrollbars ───────────────────────────────────────────────
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: $surface-700;
+    border-radius: $radius-full;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: $surface-600;
+    background-clip: content-box;
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: $surface-700 transparent;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  // ── Reusable smoke-monkey primitives ─────────────────────────
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow-sm shadow-primary/20 transition-all duration-150 hover:bg-primary-hover hover:shadow-md hover:shadow-primary/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-surface-850 px-4 py-2 text-sm font-medium text-ink-secondary shadow-soft-panel transition-all duration-150 hover:bg-surface-800 hover:text-ink-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-ink-secondary transition-colors duration-150 hover:bg-surface-800 hover:text-ink-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:pointer-events-none disabled:opacity-50;
+  }
+  .input {
+    @apply w-full rounded-lg border border-input bg-surface-900 px-3 py-2 text-sm text-ink-primary shadow-sm placeholder:text-ink-muted focus:border-primary/60 focus:outline-none focus:ring-2 focus:ring-ring/25;
+  }
+  .card {
+    @apply rounded-card border border-border bg-card/70 shadow-soft-panel;
+  }
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60;
+  }
+
+  // Card hover lift used across interactive surfaces.
+  .card-interactive {
+    @apply rounded-card border border-border bg-card/70 shadow-soft-panel transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/25 hover:shadow-card-lift;
+  }
+}
+
+@layer utilities {
+  .checkerboard {
+    background-color: #0d131c;
+    background-image:
+      linear-gradient(45deg, rgba(255, 255, 255, 0.035) 25%, transparent 25%),
+      linear-gradient(-45deg, rgba(255, 255, 255, 0.035) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, rgba(255, 255, 255, 0.035) 75%),
+      linear-gradient(-45deg, transparent 75%, rgba(255, 255, 255, 0.035) 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+  }
+  .glass {
+    background: hsla(219, 38%, 8%, 0.72);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+  .text-gradient {
+    background: linear-gradient(
+      100deg,
+      $ink-primary 0%,
+      $ink-primary 45%,
+      $primary-hover 100%
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  // ── Glassmorphism utilities ────────────────────────────────────
+  .glass-panel {
+    background: hsla(219, 38%, 8%, 0.72);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid hsla(215, 25%, 18%, 0.6);
+  }
+  .glass-hover {
+    transition: background-color 150ms ease;
+    &:hover {
+      background: hsla(219, 38%, 8%, 0.85);
+    }
+  }
+  .glass-active {
+    background: hsla(262, 83%, 58%, 0.10);
+    border-color: hsla(262, 83%, 58%, 0.40);
+  }
+  .glass-border {
+    border-color: hsla(215, 25%, 18%, 0.6);
+  }
+  .glass-border-bottom {
+    border-bottom: 1px solid hsla(215, 25%, 18%, 0.6);
+  }
+  .glass-border-top {
+    border-top: 1px solid hsla(215, 25%, 18%, 0.6);
+  }
+  .glass-border-left {
+    border-left: 1px solid hsla(215, 25%, 18%, 0.6);
+  }
+
+  // ── Workspace background ──────────────────────────────────────
+  .workspace-bg {
+    background:
+      radial-gradient(circle at 20% 10%, hsla(262, 83%, 58%, 0.08), transparent 30%),
+      radial-gradient(circle at 80% 80%, hsla(217, 90%, 50%, 0.05), transparent 30%),
+      hsl(216, 39%, 5%);
+  }
+}
+
+@layer components {
+  // ── Markdown body (assistant answers) ────────────────────────
+  .md-body {
+    @apply text-[15px] leading-relaxed text-ink-primary;
+    min-width: 0;
+    overflow-wrap: break-word;
+    word-break: break-word;
+  }
+  .md-body > *:first-child {
+    @apply mt-0;
+  }
+  .md-body > *:last-child {
+    @apply mb-0;
+  }
+  .md-body p {
+    @apply my-3;
+  }
+  .md-body h1,
+  .md-body h2,
+  .md-body h3,
+  .md-body h4 {
+    @apply mb-2 mt-5 font-semibold text-white first:mt-0;
+  }
+  .md-body h1 {
+    @apply text-xl;
+  }
+  .md-body h2 {
+    @apply text-lg;
+  }
+  .md-body h3 {
+    @apply text-base;
+  }
+  .md-body ul {
+    @apply my-3 list-disc space-y-1 pl-6;
+  }
+  .md-body ol {
+    @apply my-3 list-decimal space-y-1 pl-6;
+  }
+  .md-body li {
+    @apply my-1;
+  }
+  .md-body li::marker {
+    @apply text-ink-muted;
+  }
+  .md-body a {
+    @apply text-accent underline decoration-accent/40 underline-offset-2 transition-colors hover:text-accent-hover;
+  }
+  .md-body code:not(pre code) {
+    @apply rounded-md bg-surface-800 px-1.5 py-0.5 font-mono text-[0.85em] text-accent;
+  }
+  .md-body pre {
+    @apply my-4 overflow-x-auto rounded-xl border border-border bg-surface-950 p-4;
+  }
+  .md-body pre code {
+    @apply bg-transparent p-0 font-mono text-[13px] leading-relaxed text-slate-200;
+  }
+  .md-body blockquote {
+    @apply my-4 border-l-2 border-primary/40 pl-4 text-ink-secondary;
+  }
+  .md-body table {
+    @apply my-4 w-full border-collapse overflow-hidden rounded-lg text-sm;
+  }
+  .md-body th {
+    @apply border border-border bg-surface-850 px-3 py-2 text-left font-medium text-ink-primary;
+  }
+  .md-body td {
+    @apply border border-border px-3 py-2 text-ink-secondary;
+  }
+  .md-body hr {
+    @apply my-6 border-border;
+  }
+  .md-body strong {
+    @apply font-semibold text-white;
+  }
+  .md-body img,
+  .md-body video,
+  .md-body iframe {
+    @apply max-w-full;
+  }
+  .md-body p,
+  .md-body li {
+    min-width: 0;
+    overflow-wrap: break-word;
+  }
+}
+
+// ── Safe-area helpers for notched / home-indicator devices ──────────
+@supports (padding: env(safe-area-inset-bottom)) {
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+  .mb-safe {
+    margin-bottom: env(safe-area-inset-bottom);
+  }
+  .mt-safe {
+    margin-top: env(safe-area-inset-top);
+  }
+}
+
+// ── Mobile Touch Target Utility ──────────────────────────────────────
+.touch-target {
+  min-height: 40px;
+  min-width: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+// ── SCSS-only effects (keyframe lib + ambient helpers) ─────────
+@keyframes smokeShimmer {
+  0% {
+    background-position: -600px 0;
+  }
+  100% {
+    background-position: 600px 0;
+  }
+}
+
+@keyframes smokeFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes smokePulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes smokeOrbit {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes mobileBubbleIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-mobile-bubble {
+  animation: mobileBubbleIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+

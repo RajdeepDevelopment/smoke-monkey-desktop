@@ -1,0 +1,176 @@
+{
+  "providers": {
+    "openrouter": { "label": "OpenRouter" },
+    "nvidia": { "label": "NVIDIA NIM" },
+    "openai": { "label": "OpenAI — ChatGPT" },
+    "xai": { "label": "xAI — Grok" },
+    "ollama": { "label": "Local (Ollama)" },
+    "gemini": { "label": "Google Gemini" },
+    "opencode": { "label": "OpenCode Zen (free)" },
+    "omniroute": { "label": "OmniRoute (free, keyless)" },
+    "anthropic": { "label": "Anthropic — Claude" }
+  },
+  "presets": [
+    {
+      "role": "agentic-primary",
+      "label": "Agentic Primary (best tool-calling)",
+      "provider": "openrouter",
+      "model": "anthropic/claude-sonnet-4.6",
+      "rating": 5,
+      "isFree": false,
+      "notes": "Best tool-calling reliability for multi-step coding agents — Claude 4.6"
+    },
+    {
+      "role": "agentic-reasoning",
+      "label": "Agentic Reasoning (deep analysis)",
+      "provider": "openrouter",
+      "model": "openai/gpt-5.6-luna-pro",
+      "rating": 5,
+      "isFree": false,
+      "notes": "OpenAI flagship with extended reasoning — best for complex refactors"
+    },
+    {
+      "role": "agentic-fast",
+      "label": "Agentic Fast (quick edits)",
+      "provider": "openrouter",
+      "model": "google/gemini-3.7-flash",
+      "rating": 5,
+      "isFree": false,
+      "notes": "Fastest model with solid tool-calling for simple edits"
+    },
+    {
+      "role": "agentic-coding",
+      "label": "Agentic Coding (code-focused)",
+      "provider": "openrouter",
+      "model": "qwen/qwen3-coder",
+      "rating": 5,
+      "isFree": false,
+      "notes": "Specialized for code generation and understanding"
+    },
+    {
+      "role": "agentic-deepseek",
+      "label": "Agentic DeepSeek (cost-effective)",
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v4-pro",
+      "rating": 5,
+      "isFree": false,
+      "notes": "Strong coding at lower cost than Claude/GPT"
+    },
+    {
+      "role": "agentic-flagship",
+      "label": "Agentic Flagship (GPT-5.6)",
+      "provider": "openrouter",
+      "model": "openai/gpt-5.6-luna",
+      "rating": 5,
+      "isFree": false,
+      "notes": "OpenAI GPT-5.6 Luna — fast, excellent tool-calling and code quality"
+    },
+    {
+      "role": "agentic-grok",
+      "label": "Agentic Grok (fast reasoning)",
+      "provider": "openrouter",
+      "model": "x-ai/grok-4.6",
+      "rating": 5,
+      "isFree": false,
+      "notes": "Fast, sharp reasoning for code tasks"
+    },
+    {
+      "role": "agentic-nvidia",
+      "label": "Agentic NVIDIA (Nemotron Ultra)",
+      "provider": "nvidia",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b",
+      "rating": 5,
+      "isFree": false,
+      "notes": "Largest Nemotron 3 — maximum quality for complex tasks"
+    },
+    {
+      "role": "agentic-claude-opus",
+      "label": "Agentic Claude Opus (highest quality)",
+      "provider": "openrouter",
+      "model": "anthropic/claude-opus-4.6",
+      "rating": 5,
+      "isFree": false,
+      "notes": "Highest quality Claude — for critical/sensitive code"
+    },
+    {
+      "role": "agentic-efficiency",
+      "label": "Agentic Efficiency (quality/cost)",
+      "provider": "nvidia",
+      "model": "nvidia/nemotron-3-super-120b-a12b",
+      "rating": 5,
+      "isFree": false,
+      "notes": "Great balance of quality and cost"
+    },
+    {
+      "role": "agentic-free",
+      "label": "Agentic Free (OpenCode)",
+      "provider": "opencode",
+      "model": "deepseek-v4-flash-free",
+      "rating": 4,
+      "isFree": true,
+      "notes": "Best free option for agentic coding"
+    },
+    {
+      "role": "agentic-free-reasoning",
+      "label": "Agentic Free Reasoning (Nemotron)",
+      "provider": "opencode",
+      "model": "nemotron-3-ultra-free",
+      "rating": 4,
+      "isFree": true,
+      "notes": "Free reasoning model for complex tasks"
+    },
+    {
+      "role": "agentic-local",
+      "label": "Agentic Local (Qwen 3 32B)",
+      "provider": "ollama",
+      "model": "qwen3:32b",
+      "rating": 4,
+      "isFree": true,
+      "notes": "Best local model for agentic coding — needs 24GB+ VRAM"
+    },
+    {
+      "role": "agentic-local-fast",
+      "label": "Agentic Local Fast (Qwen 3 8B)",
+      "provider": "ollama",
+      "model": "qwen3:8b",
+      "rating": 3,
+      "isFree": true,
+      "notes": "Fast local model — good for simple edits, limited reasoning"
+    },
+    {
+      "role": "agentic-nano",
+      "label": "Agentic Nano (lightweight)",
+      "provider": "nvidia",
+      "model": "nvidia/nemotron-3-nano-30b-a3b",
+      "rating": 4,
+      "isFree": false,
+      "notes": "Low latency for quick tool calls and simple edits"
+    },
+    {
+      "role": "embed",
+      "label": "RAG embedding",
+      "provider": "openrouter",
+      "model": "nvidia/nemotron-3-embed-1b",
+      "dims": 2048,
+      "rating": 5,
+      "notes": "2048-dim, 32768 context — the active index model"
+    },
+    {
+      "role": "embed-multi",
+      "label": "Multilingual embedding",
+      "provider": "nvidia",
+      "model": "nvidia/llama-nemotron-embed-1b-v2",
+      "dims": 1024,
+      "rating": 5,
+      "notes": "Strong multilingual retrieval (different dims — needs reindex)"
+    },
+    {
+      "role": "rerank",
+      "label": "RAG reranking",
+      "provider": "openrouter",
+      "model": "nvidia/llama-nemotron-rerank-vl-1b-v2",
+      "rating": 5,
+      "notes": "Re-scores retrieval results for precision"
+    }
+  ]
+}

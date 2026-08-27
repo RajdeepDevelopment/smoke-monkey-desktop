@@ -1,0 +1,22 @@
+# Smoke Monkey gitleaks configuration
+# Baseline + lockfiles legitimately contain high-entropy strings (integrity
+# hashes, sha256 of previously-known placeholders) — exclude them.
+title = "Smoke Monkey gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Files that legitimately contain high-entropy strings or placeholders"
+paths = [
+  '''^\.secrets\.baseline$''',
+  '''\.secrets\.baseline$''',
+  '''pnpm-lock\.yaml$''',
+  '''package-lock\.json$''',
+  '''yarn\.lock$''',
+  '''^\.env\.example$''',
+  '''node_modules/''',
+  '''\.venv/''',
+  '''/dist/''',
+  '''/\.next/''',
+]

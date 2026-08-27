@@ -1,0 +1,21 @@
+{
+  "name": "desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Smoke Monkey Desktop — Tauri shell that runs the web UI against the local rag-service backend.",
+  "scripts": {
+    "build:web": "cross-env BUILD_FOR_DESKTOP=1 NEXT_PUBLIC_API_URL=http://localhost:8642 pnpm --filter web build",
+    "dev:web": "cross-env NEXT_PUBLIC_API_URL=http://localhost:8642 pnpm --filter web dev:3001",
+    "vscode-server": "node src-tauri/vscode-server/server.js",
+    "tauri": "tauri",
+    "dev": "pnpm run build:web && tauri dev",
+    "build": "pnpm run build:web && tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.4.0",
+    "cross-env": "^7.0.3"
+  },
+  "dependencies": {
+    "ws": "^8.0.0"
+  }
+}

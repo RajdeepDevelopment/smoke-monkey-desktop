@@ -1,0 +1,78 @@
+# ── Environment & Secrets ────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.cert
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
+.pnpm-store/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.python-version
+
+# ── Build outputs ────────────────────────────────────────────────────────────
+dist/
+build/
+out/
+*.tsbuildinfo
+*.js.map
+
+# ── IDE & Editor ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# ── OS files ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── Testing & Coverage ───────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+htmlcov/
+.pytest_cache/
+.tox/
+.coverage
+coverage.xml
+
+# ── Local caches & state ─────────────────────────────────────────────────────
+.ruff_cache/
+.mypy_cache/
+.smoke/
+testingAgent/
+.my-app/
+
+# ── Tauri (desktop app) ─────────────────────────────────────────────────────
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/WixTools/
+apps/desktop/src-tauri/Frameworks/
+
+# ── User data (contains profile.json with password hashes) ───────────────────
+data/desktop/
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+*.tgz
+*.tar.gz
+.cache/
+tmp/
+temp/

@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Smoke Monkey"
+abstract: >-
+  A chat LLM platform with super memory and dynamic visual widgets. Hybrid
+  RAG (pgvector + Postgres FTS, RRF fusion, reranking, HyDE, multi-query),
+  agentic query routing, durable conversation memory, and live canvas
+  visualizations rendered inside the chat.
+authors:
+  - family-names: Sadhu
+    given-names: Rajdeep
+    orcid: ""
+    website: https://github.com/RajdeepDevelopment
+keywords:
+  - RAG
+  - LLM
+  - Retrieval-Augmented Generation
+  - pgvector
+  - Next.js
+  - NestJS
+  - FastAPI
+  - NATS
+  - hybrid retrieval
+  - conversation memory
+license: PolyForm-Noncommercial-1.0.0
+date-released: "2026-08-14"
+version: 0.1.0
+repository-code: https://github.com/RajdeepDevelopment/smoke-monkey

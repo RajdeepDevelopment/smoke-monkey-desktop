@@ -1,0 +1,15 @@
+{
+  "name": "smoke-monkey",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Monorepo root for the Smoke Monkey PDF RAG platform",
+  "scripts": {
+    "build": "pnpm -r --filter ./packages/* run typecheck && pnpm --filter api-gateway build && pnpm --filter web build",
+    "dev:api": "pnpm --filter api-gateway start:dev",
+    "dev:web": "pnpm --filter web dev"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20"
+  }
+}

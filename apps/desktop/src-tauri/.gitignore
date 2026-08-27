@@ -1,0 +1,11 @@
+# Rust
+/target
+/gen/schemas
+
+# Node
+node_modules
+
+# Desktop data / local backend
+data/
+
+# Built web export is produced by the web package, not committed

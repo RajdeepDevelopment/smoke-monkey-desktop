@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Smoke Monkey Desktop",
+  "version": "0.1.0",
+  "identifier": "com.smokemonkey.desktop",
+  "build": {
+    "frontendDist": "../../web/out",
+    "devUrl": "http://localhost:3001",
+    "beforeDevCommand": "cross-env NEXT_PUBLIC_API_URL=http://localhost:8642 pnpm --filter web dev:3001",
+    "beforeBuildCommand": "pnpm --filter api-gateway build && BUILD_FOR_DESKTOP=1 pnpm --filter web build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Smoke Monkey Desktop",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Productivity",
+    "shortDescription": "AI-powered code editor with agent capabilities",
+    "longDescription": "Smoke Monkey Desktop — AI code editor with full agent capabilities, terminal access, and code intelligence. Based on Code OSS.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}

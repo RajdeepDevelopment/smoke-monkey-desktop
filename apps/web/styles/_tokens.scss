@@ -1,0 +1,122 @@
+// ─────────────────────────────────────────────────────────────────────────
+// Smoke Monkey design tokens (SCSS mirrors of the CSS custom properties).
+// Single source of truth lives in :root inside globals.scss; these SCSS
+// variables keep custom SCSS components in sync with the Tailwind theme.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Surfaces — very dark neutral blue-gray, never pure black.
+$bg: hsl(216, 39%, 5%);            // #070B10 app background
+$bg-elevated: hsl(217, 36%, 6%);   // sidebar
+$surface-950: hsl(216, 39%, 5%);
+$surface-900: hsl(216, 35%, 8%);   // #0D131D primary surface
+$surface-850: hsl(218, 36%, 10%);
+$surface-800: hsl(221, 39%, 11%);  // #111827 elevated surface
+$surface-700: hsl(215, 28%, 17%);
+$surface-600: hsl(215, 25%, 27%);
+
+// Text
+$ink-primary: hsl(210, 40%, 98%);
+$ink-secondary: hsl(213, 27%, 65%);
+$ink-muted: hsl(215, 20%, 47%);
+
+// Brand
+$primary: hsl(262, 83%, 58%);
+$primary-hover: hsl(258, 90%, 66%);
+$primary-subtle: hsla(262, 83%, 58%, 0.15);
+$accent: hsl(188, 94%, 43%);
+$accent-hover: hsl(189, 86%, 53%);
+
+// Semantic
+$success: hsl(142, 71%, 45%);
+$warning: hsl(38, 92%, 50%);
+$error: hsl(0, 84%, 60%);
+
+// Border
+$border: hsl(215, 25%, 18%);
+
+// Typography
+$font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, sans-serif;
+$font-mono: var(--font-jetbrains), ui-monospace, SFMono-Regular, monospace;
+
+// Radius
+$radius-sm: 8px;
+$radius-md: 12px;
+$radius-lg: 14px;
+$radius-full: 9999px;
+
+// Spacing scale
+$space-1: 4px;
+$space-2: 8px;
+$space-3: 12px;
+$space-4: 16px;
+$space-5: 20px;
+$space-6: 24px;
+$space-8: 32px;
+$space-10: 40px;
+
+// Layout
+$sidebar-width: 264px;
+$sidebar-width-collapsed: 76px;
+$topbar-height: 56px;
+
+// Z-index scale
+$z-backdrop: 40;
+$z-sheet: 50;
+$z-drawer: 50;
+$z-dropdown: 60;
+$z-toast: 80;
+
+// Shadows
+$shadow-card-lift:
+  0 4px 12px -2px rgba(0, 0, 0, 0.45),
+  0 1px 3px rgba(0, 0, 0, 0.4);
+$shadow-glow: 0 0 0 1px hsla(262, 83%, 58%, 0.35), 0 0 24px -6px hsla(262, 83%, 58%, 0.35);
+
+// Motion
+$duration-fast: 150ms;
+$duration-normal: 240ms;
+$duration-slow: 320ms;
+$ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+$ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+@mixin glass($blur: 14px, $alpha: 0.72) {
+  background: hsla(219, 38%, 8%, $alpha);
+  backdrop-filter: blur($blur);
+  -webkit-backdrop-filter: blur($blur);
+}
+
+@mixin scrollbar-thin {
+  &::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  &::-webkit-scrollbar-thumb {
+    background-color: $surface-700;
+    border-radius: $radius-full;
+  }
+  scrollbar-width: thin;
+  scrollbar-color: $surface-700 transparent;
+}
+
+@mixin focus-ring($color: $primary) {
+  outline: none;
+  &:focus-visible {
+    box-shadow: 0 0 0 2px hsl(214, 33%, 5%), 0 0 0 4px rgba($color, 0.45);
+  }
+}
+
+@mixin text-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@mixin line-clamp($lines: 2) {
+  display: -webkit-box;
+  -webkit-line-clamp: $lines;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

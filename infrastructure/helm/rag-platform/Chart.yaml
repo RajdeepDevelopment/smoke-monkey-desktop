@@ -1,0 +1,6 @@
+apiVersion: v2
+name: rag-platform
+description: Helm chart for the rag-platform PDF RAG system
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

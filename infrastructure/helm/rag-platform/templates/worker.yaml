@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: document-worker
+  labels:
+    {{- include "rag-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: document-worker
+spec:
+  replicas: {{ .Values.replicaCount.documentWorker }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: document-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: document-worker
+    spec:
+      containers:
+        - name: document-worker
+          image: "{{ .Values.image.repository }}/document-worker:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "rag-platform.name" . }}-config
+            - secretRef:
+                name: {{ include "rag-platform.name" . }}-secrets
+          resources:
+            {{- toYaml .Values.resources.documentWorker | nindent 12 }}

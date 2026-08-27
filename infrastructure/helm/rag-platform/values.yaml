@@ -1,0 +1,71 @@
+image:
+  repository: rag-platform
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount:
+  apiGateway: 2
+  ragService: 2
+  documentWorker: 1
+  web: 2
+
+service:
+  type: ClusterIP
+  apiGatewayPort: 3000
+  ragServicePort: 8000
+  webPort: 3000
+
+ingress:
+  enabled: false
+  webHost: rag.example.com
+  apiHost: api.rag.example.com
+
+config:
+  ragEnv: "production"
+  postgresHost: "postgres"
+  postgresPort: 5432
+  postgresUser: "rag"
+  postgresDb: "ragdb"
+  redisHost: "redis"
+  redisPort: 6379
+  natsUrl: "nats://nats:4222"
+  minioEndpoint: "minio"
+  minioPort: 9000
+  minioBucket: "documents"
+  minioSecure: "false"
+  ollamaBaseUrl: "http://ollama:11434"
+  ollamaChatModel: "qwen3:8b"
+  ollamaEmbedModel: "nomic-embed-text"
+  ollamaEmbedDims: 768
+  ragServiceUrl: "http://rag-service:8000"
+  corsOrigins: "https://rag.example.com"
+  hydeEnabled: true
+  multiQueryEnabled: true
+  rerankEnabled: false
+  cacheEnabled: true
+  queryCacheTtl: 300
+  ocrEnabled: false
+  topK: 12
+  chunkSize: 800
+  chunkOverlap: 80
+
+secrets:
+  postgresPassword: "rag_secret"
+  redisPassword: ""
+  minioAccessKey: "ragminio"
+  minioSecretKey: "ragminio_secret"
+  jwtSecret: "change-me-in-production"
+
+resources:
+  apiGateway:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits: { cpu: "1", memory: "1Gi" }
+  ragService:
+    requests: { cpu: "200m", memory: "512Mi" }
+    limits: { cpu: "2", memory: "2Gi" }
+  documentWorker:
+    requests: { cpu: "200m", memory: "512Mi" }
+    limits: { cpu: "2", memory: "2Gi" }
+  web:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits: { cpu: "1", memory: "1Gi" }

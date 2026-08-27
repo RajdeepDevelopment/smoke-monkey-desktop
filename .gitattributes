@@ -1,0 +1,35 @@
+# Normalize line endings
+* text=auto
+
+# Markdown / docs
+*.md text
+*.cff text
+
+# Shell scripts — LF
+*.sh text eol=lf
+Makefile text eol=lf
+
+# Python
+*.py text diff=python
+
+# TypeScript / JavaScript / JSON
+*.ts text diff=ts
+*.tsx text diff=tsx
+*.js text diff=javascript
+*.jsx text diff=javascript
+*.json text
+*.jsonc text
+
+# Lockfiles — treat as binary to avoid noisy diffs
+pnpm-lock.yaml text
+*.lock binary
+
+# Images
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.svg text
+
+# Env templates
+.env.example text

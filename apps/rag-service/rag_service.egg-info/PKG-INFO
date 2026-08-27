@@ -1,0 +1,22 @@
+Metadata-Version: 2.4
+Name: rag-service
+Version: 0.1.0
+Summary: RAG query engine: query understanding, hybrid retrieval, reranking, streaming generation
+Requires-Python: >=3.12
+Requires-Dist: fastapi>=0.111.0
+Requires-Dist: uvicorn[standard]>=0.30.0
+Requires-Dist: sse-starlette>=2.1.0
+Requires-Dist: asyncpg>=0.29.0
+Requires-Dist: redis>=5.0.0
+Requires-Dist: httpx>=0.27.0
+Requires-Dist: pydantic>=2.7.4
+Requires-Dist: pydantic-settings>=2.3.4
+Requires-Dist: numpy>=1.26.4
+Provides-Extra: rerank
+Requires-Dist: sentence-transformers>=3.0.0; extra == "rerank"
+Provides-Extra: dev
+Requires-Dist: pytest>=8.2; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23; extra == "dev"
+Requires-Dist: httpx>=0.27; extra == "dev"
+Requires-Dist: ruff>=0.5; extra == "dev"
+Requires-Dist: mypy>=1.10; extra == "dev"

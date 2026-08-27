@@ -1,0 +1,94 @@
+version: "3.8"
+
+services:
+  api-gateway:
+    build: ./apps/api-gateway
+    ports:
+      - "3000:3000"
+    env_file: .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/workspace
+    depends_on:
+      - postgres
+      - redis
+      - nats
+      - minio
+      - ollama
+    restart: unless-stopped
+
+  web:
+    build: ./apps/web
+    ports:
+      - "3001:3001"
+    env_file: .env
+    depends_on:
+      - api-gateway
+      - postgres
+      - redis
+      - nats
+      - minio
+      - ollama
+    restart: unless-stopped
+
+  document-worker:
+    build: ./apps/document-worker
+    environment:
+      - DATABASE_URL=postgresql://rag:rag@postgres/ragdb
+      - MINIO_ENDPOINT=minio:9000
+      - NATS_URL=nats://nats:4222
+    depends_on:
+      - postgres
+      - minio
+      - nats
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+      POSTGRES_DB: ragdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  nats:
+    image: nats:2
+    ports:
+      - "4222:4222"
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollamadataser: /root/.ollama
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  miniodata:
+  ollamadataser:
