@@ -1,7 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Send, Square, Loader2, Check, X, AlertTriangle, Copy, ExternalLink, ChevronDown, ChevronRight, MessageSquare, Bot, Wrench, FileText, Loader, Code2, History, Plus, KeyRound } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+import {
+  Send, Square, Loader2, Check, X, Copy, ExternalLink, ChevronDown, ChevronRight,
+  MessageSquare, Bot, Wrench, FileText, Code2, History, Plus, KeyRound,
+  Search as SearchIcon, Terminal as TerminalIcon, PenLine, FilePlus2, Trash2,
+  FlaskConical, GitBranch, FolderTree, ListChecks, AlertCircle, Sparkles, Container,
+} from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
@@ -12,6 +18,9 @@ import { api } from '../../lib/api';
 import { cn } from '../../lib/utils';
 import type { ModelProvider, UserKeyDto } from '@rag/contracts';
 import { ModelPicker } from '../chat/ModelPicker';
+import { AskUserDialog } from './AskUserDialog';
+import { InlineDiff } from './InlineDiff';
+import { AnsiText } from '../../lib/ansi';
 
 interface Props {
   sessionId: string;
@@ -28,43 +37,55 @@ interface Props {
   activeSessionId?: string;
   onSelectSession?: (s: AgentSession) => void;
   onNewSession?: () => void;
+  /** When set, the agent runs on this remote SSH profile. */
+  remoteProfileId?: string;
 }
 
 /** Providers that require a user-uploaded API key (no env var fallback in production). */
-const KEY_REQUIRED_PROVIDERS = new Set(['openrouter', 'nvidia', 'openai', 'xai', 'gemini']);
+const KEY_REQUIRED_PROVIDERS = new Set(['openrouter', 'nvidia', 'openai', 'xai', 'gemini', 'opencode']);
 
-// Timeline event types for inline rendering
-const TOOL_ICONS: Record<string, typeof Wrench> = {
-  run_command: Wrench,
-  run_test: Wrench,
-  read_file: FileText,
-  write_file: FileText,
-  edit_file: FileText,
-  apply_patch: FileText,
-  list_directory: FileText,
-  glob: FileText,
-  grep: FileText,
+// ── Tool metadata: semantic identity + activity grouping ──────────────────
+
+type ToolFamily = 'inspect' | 'edit' | 'run' | 'verify' | 'git' | 'plan' | 'ask';
+
+interface ToolMeta {
+  label: string;
+  icon: LucideIcon;
+  family: ToolFamily;
+  familyLabel: string;
+}
+
+const TOOL_META: Record<string, ToolMeta> = {
+  search_code: { label: 'Search', icon: SearchIcon, family: 'inspect', familyLabel: 'Inspecting' },
+  grep: { label: 'Search', icon: SearchIcon, family: 'inspect', familyLabel: 'Inspecting' },
+  glob: { label: 'Search', icon: SearchIcon, family: 'inspect', familyLabel: 'Inspecting' },
+  find_symbol: { label: 'Find', icon: SearchIcon, family: 'inspect', familyLabel: 'Inspecting' },
+  read_file: { label: 'Read', icon: FileText, family: 'inspect', familyLabel: 'Inspecting' },
+  list_directory: { label: 'List', icon: FolderTree, family: 'inspect', familyLabel: 'Inspecting' },
+  docker_list: { label: 'Containers', icon: Container, family: 'inspect', familyLabel: 'Inspecting' },
+  edit_file: { label: 'Edit', icon: PenLine, family: 'edit', familyLabel: 'Editing' },
+  replace_lines: { label: 'Replace', icon: PenLine, family: 'edit', familyLabel: 'Editing' },
+  apply_patch: { label: 'Patch', icon: FilePlus2, family: 'edit', familyLabel: 'Editing' },
+  write_file: { label: 'Write', icon: FilePlus2, family: 'edit', familyLabel: 'Editing' },
+  delete_file: { label: 'Delete', icon: Trash2, family: 'edit', familyLabel: 'Editing' },
+  run_command: { label: 'Run', icon: TerminalIcon, family: 'run', familyLabel: 'Running' },
+  docker_exec: { label: 'Run', icon: TerminalIcon, family: 'run', familyLabel: 'Running' },
+  ssh_run: { label: 'Run', icon: TerminalIcon, family: 'run', familyLabel: 'Running' },
+  run_test: { label: 'Test', icon: FlaskConical, family: 'verify', familyLabel: 'Verifying' },
+  git_status: { label: 'Git status', icon: GitBranch, family: 'git', familyLabel: 'Git' },
+  git_diff: { label: 'Diff', icon: GitBranch, family: 'git', familyLabel: 'Git' },
+  git_log: { label: 'Log', icon: GitBranch, family: 'git', familyLabel: 'Git' },
+  todo_write: { label: 'Plan', icon: ListChecks, family: 'plan', familyLabel: 'Planning' },
+  ask_user: { label: 'Ask', icon: MessageSquare, family: 'ask', familyLabel: 'Asking' },
 };
 
-const TOOL_LABELS: Record<string, string> = {
-  read_file: 'Reading',
-  write_file: 'Writing',
-  edit_file: 'Editing',
-  apply_patch: 'Patching',
-  delete_file: 'Deleting',
-  list_directory: 'Listing',
-  run_command: 'Running',
-  run_test: 'Testing',
-  glob: 'Searching',
-  grep: 'Searching',
-  find_symbol: 'Finding',
-  search_code: 'Searching',
-  git_status: 'Git status',
-  git_diff: 'Git diff',
-  git_log: 'Git log',
-  todo_write: 'Updating todos',
-  ask_user: 'Asking',
-};
+const FALLBACK_META: ToolMeta = { label: 'Tool', icon: Wrench, family: 'run', familyLabel: 'Running' };
+
+function metaFor(name: string): ToolMeta {
+  return TOOL_META[name] || FALLBACK_META;
+}
+
+// ── Shared helpers ───────────────────────────────────────────────────────
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -84,7 +105,7 @@ function CopyButton({ text }: { text: string }) {
           setTimeout(() => setCopied(false), 1500);
         });
       }}
-      className="p-1 rounded hover:bg-muted/80 text-ink-muted hover:text-foreground transition-colors"
+      className="p-1 rounded-md hover:bg-muted/80 text-ink-muted hover:text-foreground transition-colors"
       title="Copy"
     >
       {copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
@@ -92,25 +113,14 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function MarkdownRenderer({ content, onFileSelect }: { content: string; onFileSelect?: (path: string) => void }) {
+/**
+ * Premium markdown body. Rely on the shared `.md-body` token styles (spacing,
+ * lists, headings, inline code) instead of stacked prose overrides, so
+ * assistant answers read like a real chat — not bordered cards.
+ */
+function MarkdownRenderer({ content, onFileSelect: _onFileSelect }: { content: string; onFileSelect?: (path: string) => void }) {
   return (
-    <div className="prose prose-invert prose-sm max-w-none
-      [&>pre]:rounded-lg [&>pre]:border [&>pre]:border-border [&>pre]:bg-background [&>pre]:p-0 [&>pre]:my-3
-      [&_code]:text-[13px] [&_code]:font-mono
-      [&_pre_code]:block [&_pre_code]:p-4 [&_pre_code]:overflow-x-auto
-      [&_pre_code]:!bg-transparent [&_pre_code]:!text-foreground
-      [&_p]:my-1.5 [&_p]:leading-relaxed
-      [&_ul]:my-1.5 [&_ol]:my-1.5 [&_li]:my-0.5
-      [&_h1]:text-lg [&_h1]:font-semibold [&_h1]:mt-4 [&_h1]:mb-2
-      [&_h2]:text-base [&_h2]:font-semibold [&_h2]:mt-3 [&_h2]:mb-1.5
-      [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mt-2 [&_h3]:mb-1
-      [&_blockquote]:border-l-2 [&_blockquote]:border-primary/40 [&_blockquote]:pl-3 [&_blockquote]:italic [&_blockquote]:text-ink-muted
-      [&_table]:text-xs [&_table]:border-collapse [&_table]:w-full
-      [&_th]:border [&_th]:border-border [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:bg-muted/50
-      [&_td]:border [&_td]:border-border [&_td]:px-2 [&_td]:py-1
-      [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2
-      [&_hr]:my-4 [&_hr]:border-border
-    ">
+    <div className="md-body min-w-0 text-[13.5px]">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}
@@ -124,19 +134,26 @@ function MarkdownRenderer({ content, onFileSelect }: { content: string; onFileSe
                 : Array.isArray(child.props?.children)
                   ? child.props.children.map((c: any) => typeof c === 'string' ? c : c?.props?.children || '').join('')
                   : '';
+
+              if (lang === 'diff') {
+                return <InlineDiff diffText={codeText} />;
+              }
+
               return (
-                <div className="relative group">
-                  <div className="flex items-center justify-between px-3 py-1 border-b border-border bg-muted/30 rounded-t-lg">
-                    <span className="text-[10px] text-ink-muted font-mono">{lang || 'code'}</span>
-                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <CopyButton text={codeText} />
+                <div className="group relative my-2.5 overflow-hidden rounded-lg border border-border bg-surface-950/80">
+                  {lang && (
+                    <div className="flex items-center justify-between border-b border-border/50 px-2.5 py-1">
+                      <span className="text-[10px] text-ink-muted/80 font-mono">{lang}</span>
+                      <div className="opacity-0 group-hover:opacity-100 transition-opacity">
+                        <CopyButton text={codeText} />
+                      </div>
                     </div>
-                  </div>
-                  <pre className="!bg-background !p-4 !overflow-x-auto !rounded-t-none">{children}</pre>
+                  )}
+                  <pre className="!my-0 !rounded-none !border-0 !bg-transparent !p-3">{children}</pre>
                 </div>
               );
             }
-            return <pre className="!bg-background !p-4 !overflow-x-auto">{children}</pre>;
+            return <pre className="!my-2.5">{children}</pre>;
           },
         }}
       >
@@ -146,90 +163,194 @@ function MarkdownRenderer({ content, onFileSelect }: { content: string; onFileSe
   );
 }
 
-// ── Inline tool call card ────────────────────────────────────────────────
+// ── Tool call rendering: compact agent-action rows ──────────────────────
 
-function InlineToolCard({ tc, startTime, onFileSelect }: { tc: { id: string; toolName: string; arguments: unknown; status: string; output?: string; result?: unknown; error?: string }; startTime?: number; onFileSelect?: (path: string) => void }) {
-  const [expanded, setExpanded] = useState(false);
-  const label = TOOL_LABELS[tc.toolName] || tc.toolName;
-  const Icon = TOOL_ICONS[tc.toolName] || Wrench;
+const FAMILY_LABELS: Record<ToolFamily, string> = {
+  inspect: 'Inspecting',
+  edit: 'Editing',
+  run: 'Running',
+  verify: 'Verifying',
+  git: 'Git',
+  plan: 'Planning',
+  ask: 'Asking',
+};
 
+/** Short, human-readable target for a tool call (path, pattern, or command). */
+function toolTarget(tc: { toolName: string; arguments: unknown }): string {
+  const args = (typeof tc.arguments === 'object' && tc.arguments !== null ? tc.arguments : {}) as Record<string, unknown>;
+  const first = (...keys: string[]) => {
+    for (const k of keys) {
+      const v = args[k];
+      if (typeof v === 'string' && v) return v;
+    }
+    return undefined;
+  };
+  let t: string | undefined;
+  if (tc.toolName === 'run_command' || tc.toolName === 'run_test' || tc.toolName === 'ssh_run' || tc.toolName === 'docker_exec') {
+    t = first('command');
+  } else if (tc.toolName === 'grep' || tc.toolName === 'search_code') {
+    t = String(first('regex', 'pattern', 'query') ?? first('path', 'include') ?? '');
+  } else if (tc.toolName === 'glob') {
+    t = String(first('pattern', 'path') ?? '');
+  } else if (tc.toolName === 'find_symbol') {
+    t = String(first('symbol', 'name', 'query') ?? '');
+  } else if (tc.toolName === 'ask_user') {
+    t = String(first('question') ?? '');
+  } else {
+    t = String(first('path', 'filePath', 'relativePath') ?? '');
+  }
+  if (!t) return '';
+  return t.replace(/\s+/g, ' ').trim();
+}
+
+function toolRenderStatus(status: string): 'active' | 'ok' | 'err' | 'blocked' {
+  if (status === 'running' || status === 'queued') return 'active';
+  if (status === 'completed') return 'ok';
+  if (status === 'failed') return 'err';
+  return 'blocked';
+}
+
+/** Extract a fenced ```diff …``` block from tool result text, if present. */
+const FENCES = /```diff\s*\n([\s\S]*?)```/;
+function extractDiffBlock(text: string): string | null {
+  if (!text) return null;
+  const m = FENCES.exec(text);
+  return m ? m[1] : null;
+}
+
+const EDIT_TOOLS = new Set(['edit_file', 'replace_lines', 'apply_patch', 'write_file', 'delete_file']);
+
+interface TcShape {
+  id: string;
+  toolName: string;
+  arguments: unknown;
+  status: string;
+  output?: string;
+  result?: unknown;
+  error?: string;
+}
+
+/** One lightweight agent action; click to reveal arguments/output. */
+function ToolRow({ tc, startTime, onFileSelect }: { tc: TcShape; startTime?: number; onFileSelect?: (path: string) => void }) {
+  const meta = metaFor(tc.toolName);
+  const Icon = meta.icon;
+  const status = toolRenderStatus(tc.status);
+  const [expanded, setExpanded] = useState(
+    (tc.toolName === 'run_command' || tc.toolName === 'run_test') && (tc.status === 'running' || tc.status === 'queued'),
+  );
+  const outputRef = useRef<HTMLPreElement>(null);
+
+  // Keep the tail of a streaming command visible as it grows.
+  useEffect(() => {
+    if ((tc.toolName === 'run_command' || tc.toolName === 'run_test') && tc.status === 'running' && outputRef.current) {
+      outputRef.current.scrollTop = outputRef.current.scrollHeight;
+    }
+  }, [tc.output, tc.status, tc.toolName]);
+
+  const target = toolTarget(tc);
+  const command = (tc.toolName === 'run_command' || tc.toolName === 'run_test' || tc.toolName === 'ssh_run' || tc.toolName === 'docker_exec')
+    ? (typeof tc.arguments === 'object' && tc.arguments !== null ? (tc.arguments as Record<string, unknown>).command : undefined)
+    : undefined;
   const filePath = typeof tc.arguments === 'object' && tc.arguments !== null
     ? (tc.arguments as Record<string, unknown>).path || (tc.arguments as Record<string, unknown>).filePath
     : undefined;
-
-  const command = typeof tc.arguments === 'object' && tc.arguments !== null
-    ? (tc.arguments as Record<string, unknown>).command
-    : undefined;
-
-  const argsStr = typeof tc.arguments === 'object' ? JSON.stringify(tc.arguments, null, 2) : String(tc.arguments || '');
+  const argsStr = typeof tc.arguments === 'object' && tc.arguments !== null ? JSON.stringify(tc.arguments, null, 2) : String(tc.arguments || '');
+  const duration = startTime && status !== 'active' ? formatDuration(Date.now() - startTime) : null;
+  const outputDiff = EDIT_TOOLS.has(tc.toolName) ? extractDiffBlock(tc.output || '') : null;
 
   return (
-    <div className="ml-6 rounded-lg border border-border/50 bg-surface/50 overflow-hidden text-xs">
+    <div className="ml-6">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-surface-hover transition-colors text-left"
+        aria-expanded={expanded}
+        className={cn(
+          'group flex w-full items-center gap-1.5 rounded-md px-1.5 py-[5px] pr-2 text-left transition-colors',
+          status === 'active' && 'bg-white/[0.02]',
+          status === 'err' ? 'hover:bg-red-500/[0.06]' : 'hover:bg-white/[0.035]',
+        )}
       >
-        {tc.status === 'running' || tc.status === 'queued' ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-400 shrink-0" />
-        ) : tc.status === 'completed' ? (
-          <span className="h-3.5 w-3.5 shrink-0 text-green-500 flex items-center justify-center">✓</span>
-        ) : tc.status === 'failed' ? (
-          <span className="h-3.5 w-3.5 shrink-0 text-red-500 flex items-center justify-center">✕</span>
-        ) : (
-          <Icon className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
+        <span
+          className={cn(
+            'shrink-0',
+            status === 'active' ? 'text-blue-400' : status === 'err' ? 'text-red-400' : status === 'blocked' ? 'text-yellow-400' : 'text-ink-muted/60',
+          )}
+        >
+          {status === 'active' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Icon className="h-3 w-3" />}
+        </span>
+
+        <span className="shrink-0 text-[11px] font-medium text-foreground/70">{meta.label}</span>
+
+        {target && (
+          <span
+            className={cn(
+              'min-w-0 flex-1 truncate font-mono text-[11px]',
+              status === 'err' ? 'text-red-400/70' : 'text-ink-muted',
+            )}
+            title={target}
+          >
+            {target}
+          </span>
         )}
 
-        <span className="text-foreground/80 font-medium">{label}</span>
+        {status === 'ok' && <span className="shrink-0 text-[10px] text-green-500/70">✓</span>}
+        {status === 'blocked' && <span className="shrink-0 text-[10px] text-yellow-400/80">!</span>}
+        {duration && <span className="shrink-0 text-[9px] text-ink-muted/40">{duration}</span>}
 
-        {typeof command === 'string' && (
-          <code className="text-ink-muted font-mono truncate max-w-[250px] bg-background/50 px-1.5 py-0.5 rounded">
-            $ {command}
-          </code>
-        )}
-        {typeof filePath === 'string' && (
-          <code className="text-ink-muted font-mono truncate max-w-[250px]">
-            {filePath}
-          </code>
-        )}
-        {!filePath && !command && (tc.status === 'running' || tc.status === 'queued') && (
-          <span className="text-ink-muted/60">running...</span>
-        )}
-        {startTime && tc.status !== 'running' && tc.status !== 'queued' && (
-          <span className="text-ink-muted/50 ml-auto text-[10px]">{formatDuration(Date.now() - startTime)}</span>
-        )}
-
-        <span className="ml-auto shrink-0">
-          {expanded ? <ChevronDown className="h-3 w-3 text-ink-muted" /> : <ChevronRight className="h-3 w-3 text-ink-muted" />}
+        <span className="shrink-0">
+          {expanded ? <ChevronDown className="h-3 w-3 text-ink-muted/40" /> : <ChevronRight className="h-3 w-3 text-ink-muted/40" />}
         </span>
       </button>
 
       {expanded && (
-        <div className="border-t border-border/50 px-3 py-2 space-y-2 bg-background/30">
-          {argsStr && argsStr !== '{}' && (
+        <div className="mt-1 mb-1.5 ml-3.5 space-y-1.5 rounded-lg border border-border/40 bg-surface-900/40 px-2.5 py-2 text-[11px]">
+          {typeof command === 'string' && (
             <div>
-              <p className="text-[10px] font-medium text-ink-muted mb-1 uppercase tracking-wider">Arguments</p>
-              <pre className="text-[11px] text-foreground/70 bg-background rounded p-2 overflow-x-auto max-h-32 overflow-y-auto font-mono">
+              <p className="mb-0.5 text-[9px] font-semibold uppercase tracking-wider text-ink-muted/70">Command</p>
+              <pre className="overflow-x-auto rounded bg-black/30 p-1.5 font-mono text-[11px] text-ink-secondary break-all whitespace-pre-wrap">
+                $ {command}
+              </pre>
+            </div>
+          )}
+          {(argsStr && argsStr !== '{}' && typeof command !== 'string') && (
+            <div>
+              <p className="mb-0.5 text-[9px] font-semibold uppercase tracking-wider text-ink-muted/70">Arguments</p>
+              <pre className="max-h-32 overflow-y-auto overflow-x-auto rounded bg-black/30 p-1.5 font-mono text-[11px] text-ink-secondary break-all whitespace-pre-wrap">
                 {argsStr}
               </pre>
             </div>
           )}
           {tc.output && (
             <div>
-              <p className="text-[10px] font-medium text-ink-muted mb-1 uppercase tracking-wider">Output</p>
-              <pre className="text-[11px] text-foreground/70 bg-background rounded p-2 overflow-x-auto max-h-48 overflow-y-auto font-mono whitespace-pre-wrap break-all">
-                {tc.output.slice(0, 5000)}
-              </pre>
+              <p className="mb-0.5 text-[9px] font-semibold uppercase tracking-wider text-ink-muted/70">Output</p>
+              {outputDiff ? (
+                <InlineDiff diffText={outputDiff} filePath={typeof filePath === 'string' ? filePath : undefined} maxHeight={280} />
+              ) : (
+                <pre
+                  ref={outputRef}
+                  className={cn(
+                    'max-h-64 overflow-y-auto overflow-x-auto rounded p-1.5 font-mono text-[11px] break-all whitespace-pre-wrap',
+                    (tc.toolName === 'run_command' || tc.toolName === 'run_test')
+                      ? 'text-emerald-200/70 bg-black/60'
+                      : 'text-ink-secondary/90 bg-black/30',
+                  )}
+                >
+                  <AnsiText text={tc.output.slice(0, 20000)} />
+                  {(tc.toolName === 'run_command' || tc.toolName === 'run_test') && tc.status === 'running' && (
+                    <span className="ml-0.5 inline-block h-3 w-1.5 bg-emerald-300/80 align-middle animate-pulse" />
+                  )}
+                </pre>
+              )}
             </div>
           )}
           {tc.error && (
             <div>
-              <p className="text-[10px] font-medium text-red-400 mb-1 uppercase tracking-wider">Error</p>
-              <pre className="text-[11px] text-red-400/80 bg-red-500/5 rounded p-2 overflow-x-auto font-mono">
+              <p className="mb-0.5 text-[9px] font-semibold uppercase tracking-wider text-red-400/80">Error</p>
+              <pre className="overflow-x-auto rounded bg-red-500/[0.06] p-1.5 font-mono text-[11px] text-red-300/90 break-all whitespace-pre-wrap">
                 {tc.error}
               </pre>
             </div>
           )}
-          {typeof filePath === 'string' && onFileSelect && tc.status === 'completed' && (
+          {typeof filePath === 'string' && onFileSelect && status === 'ok' && (
             <button
               onClick={() => onFileSelect(filePath)}
               className="flex items-center gap-1 text-[10px] text-primary hover:text-primary/80 transition-colors"
@@ -243,22 +364,99 @@ function InlineToolCard({ tc, startTime, onFileSelect }: { tc: { id: string; too
   );
 }
 
-// ── Thinking indicator ───────────────────────────────────────────────────
-
-function ThinkingIndicator() {
+/** Small phase label that groups related actions ("● Inspecting"). */
+function ActivityHeader({ label, count }: { label: string; count: number }) {
   return (
-    <div className="ml-6 flex items-center gap-2 text-xs text-ink-muted/70 py-1">
-      <div className="flex gap-1">
-        <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '0ms' }} />
-        <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '150ms' }} />
-        <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-bounce" style={{ animationDelay: '300ms' }} />
-      </div>
-      <span>Thinking...</span>
+    <div className="ml-6 py-0.5 flex items-center gap-1.5">
+      <span className="h-1 w-1 rounded-full bg-primary/60" />
+      <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted/70">{label}</span>
+      {count > 1 && <span className="text-[9px] tabular-nums text-ink-muted/40">{count}</span>}
     </div>
   );
 }
 
-// ── Status bar ───────────────────────────────────────────────────────────
+// ── Todo list ────────────────────────────────────────────────────────────
+
+function TodoList({ todos }: { todos: Array<{ content: string; status: string; priority: string }> }) {
+  const [expanded, setExpanded] = useState(true);
+  const completed = todos.filter(t => t.status === 'completed').length;
+  const inProgress = todos.filter(t => t.status === 'in_progress').length;
+
+  return (
+    <div className="sticky top-0 z-10 ml-6 mb-1 rounded-lg bg-background/90 backdrop-blur-sm px-1.5 py-1">
+      <button onClick={() => setExpanded(!expanded)} className="flex w-full items-center gap-1.5 py-1 text-left transition-colors hover:text-foreground">
+        <ListChecks className="h-3 w-3 shrink-0 text-ink-muted/70" />
+        <span className="text-[11px] font-medium text-foreground/75">Task list</span>
+        <span className="text-[10px] text-ink-muted/60">
+          {completed}/{todos.length} done{inProgress > 0 && ` · ${inProgress} active`}
+        </span>
+        {expanded ? <ChevronDown className="ml-auto h-3 w-3 text-ink-muted/40" /> : <ChevronRight className="ml-auto h-3 w-3 text-ink-muted/40" />}
+      </button>
+      {expanded && (
+        <div className="mb-1 space-y-0.5 pl-4">
+          {todos.map((t, i) => {
+            const done = t.status === 'completed';
+            const active = t.status === 'in_progress';
+            const cancelled = t.status === 'cancelled';
+            return (
+              <div key={i} className={`flex items-center gap-2 py-0.5 text-[11px] ${cancelled ? 'opacity-40' : ''}`}>
+                <span className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${done ? 'border-green-500/50 bg-green-500/15 text-green-400' : active ? 'border-blue-500/50 bg-blue-500/15 text-blue-400' : 'border-border text-transparent'}`}>
+                  {done ? <Check className="h-2.5 w-2.5" /> : active ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : null}
+                </span>
+                <span className={`min-w-0 flex-1 truncate ${done ? 'line-through text-ink-muted/50' : cancelled ? 'line-through text-ink-muted/40' : 'text-ink-secondary'}`}>
+                  {t.content}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Thinking + agent state indicators ────────────────────────────────────
+
+function ThinkingIndicator() {
+  return (
+    <div className="flex items-center gap-2 py-0.5 text-xs text-ink-muted/60">
+      <div className="flex gap-1">
+        <span className="h-1.5 w-1.5 rounded-full bg-blue-400/80 animate-bounce" style={{ animationDelay: '0ms' }} />
+        <span className="h-1.5 w-1.5 rounded-full bg-blue-400/80 animate-bounce" style={{ animationDelay: '150ms' }} />
+        <span className="h-1.5 w-1.5 rounded-full bg-blue-400/80 animate-bounce" style={{ animationDelay: '300ms' }} />
+      </div>
+      <span>Thinking…</span>
+    </div>
+  );
+}
+
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K`;
+  return String(n);
+}
+
+/** Live banner shown while the agent summarizes & prunes older context. */
+function CompactingBanner() {
+  return (
+    <div className="ml-6 flex items-center gap-2 py-1 text-[11px] text-violet-300/70">
+      <Loader2 className="h-3 w-3 animate-spin" />
+      <span>Condensing older conversation into a summary…</span>
+    </div>
+  );
+}
+
+/** Collapsed notice rendered once after a compaction completes. */
+function CompactedNotice({ tokensSaved }: { tokensSaved: number }) {
+  return (
+    <div className="ml-6 flex items-center gap-2 py-0.5 text-[11px] text-ink-muted/60">
+      <History className="h-3 w-3 shrink-0 text-violet-300/60" />
+      <span>Context compacted · saved ~{formatTokenCount(tokensSaved)} tokens</span>
+    </div>
+  );
+}
+
+// ── Status line ──────────────────────────────────────────────────────────
 
 function AgentStatusIndicator({ stepCount, duration, isRunning, streamingText, messages }: {
   stepCount: number;
@@ -269,47 +467,30 @@ function AgentStatusIndicator({ stepCount, duration, isRunning, streamingText, m
 }) {
   if (!isRunning) return null;
 
-  // Count tools from the last assistant message
   const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
   const toolCalls = lastAssistant?.toolCalls || [];
   const runningTools = toolCalls.filter((tc) => tc.status === 'running' || tc.status === 'queued');
   const completedTools = toolCalls.filter((tc) => tc.status === 'completed');
   const currentTool = runningTools[0];
 
-  let statusText = 'Thinking...';
-  let statusIcon = '◌';
+  let statusText = 'Thinking…';
   if (streamingText) {
-    statusText = 'Generating response...';
-    statusIcon = '◉';
+    statusText = 'Generating response…';
   } else if (currentTool) {
-    const label = TOOL_LABELS[currentTool.toolName] || currentTool.toolName;
-    const cmd = typeof currentTool.arguments === 'object' && currentTool.arguments !== null
-      ? (currentTool.arguments as Record<string, unknown>).command
-      : undefined;
-    statusText = typeof cmd === 'string' ? `Running: ${cmd}` : `${label}...`;
-    statusIcon = '⚙';
+    const meta = metaFor(currentTool.toolName);
+    const cmd = toolTarget(currentTool);
+    statusText = cmd ? `${meta.label}: ${cmd}` : `${meta.label}…`;
   } else if (stepCount > 0) {
-    statusText = `Step ${stepCount} — LLM thinking...`;
-    statusIcon = '◌';
+    statusText = `Step ${stepCount} — thinking…`;
   }
 
   return (
-    <div className="flex items-center gap-2 px-4 py-2 text-xs glass-border-bottom bg-muted/20">
-      <span className="text-blue-400 animate-pulse">{statusIcon}</span>
-      <span className="text-foreground/70">{statusText}</span>
-      <span className="text-ink-muted/50">·</span>
-      <span>{formatDuration(duration)}</span>
+    <div className="flex items-center gap-2 border-b border-border/30 px-4 py-1.5 text-[11px] text-ink-muted/80">
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-blue-400 animate-pulse-soft" />
+      <span className="min-w-0 flex-1 truncate">{statusText}</span>
+      <span className="shrink-0 tabular-nums">{formatDuration(duration)}</span>
       {completedTools.length > 0 && (
-        <>
-          <span className="text-ink-muted/50">·</span>
-          <span className="text-green-500/70">{completedTools.length} done</span>
-        </>
-      )}
-      {toolCalls.length > 0 && (
-        <>
-          <span className="text-ink-muted/50">·</span>
-          <span>{toolCalls.length} tool{toolCalls.length !== 1 ? 's' : ''}</span>
-        </>
+        <span className="shrink-0 text-green-500/70">{completedTools.length} done</span>
       )}
     </div>
   );
@@ -317,17 +498,20 @@ function AgentStatusIndicator({ stepCount, duration, isRunning, streamingText, m
 
 // ── Main AgentChat ───────────────────────────────────────────────────────
 
-export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange, onFileSelect, model, provider, onModelChange, injectedPrompt, sessions = [], activeSessionId, onSelectSession, onNewSession }: Props) {
+export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange, onFileSelect, model, provider, onModelChange, injectedPrompt, sessions = [], activeSessionId, onSelectSession, onNewSession, remoteProfileId }: Props) {
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [input, setInput] = useState('');
   const [streamingText, setStreamingText] = useState('');
   const [stepCount, setStepCount] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [todos, setTodos] = useState<Array<{ content: string; status: string; priority: string }> | null>(null);
   const [pendingPermission, setPendingPermission] = useState<{ toolCallId: string; toolName: string; args: unknown } | null>(null);
   const [pendingAskUser, setPendingAskUser] = useState<{ toolCallId: string; question: string; options: Array<{ label: string; description: string }>; multiple: boolean } | null>(null);
   const [isUserScrolled, setIsUserScrolled] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [isCompacting, setIsCompacting] = useState(false);
+  const [lastCompaction, setLastCompaction] = useState<{ tokensBefore: number; tokensAfter: number; tokensSaved: number; messagesCompacted: number } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -420,6 +604,22 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
         setDuration(0);
         setIsUserScrolled(false);
         setIsThinking(true);
+        setIsCompacting(false);
+        setLastCompaction(null);
+        break;
+
+      case 'compaction.started':
+        setIsCompacting(true);
+        break;
+
+      case 'compaction.completed':
+        setIsCompacting(false);
+        setLastCompaction({
+          tokensBefore: data.tokensBefore as number,
+          tokensAfter: data.tokensAfter as number,
+          tokensSaved: data.tokensSaved as number,
+          messagesCompacted: data.messagesCompacted as number,
+        });
         break;
 
       case 'text.delta':
@@ -624,6 +824,10 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
         toolStartTimes.current.delete(data.toolCallId as string);
         break;
 
+      case 'todo.updated':
+        setTodos(Array.isArray(data.todos) ? data.todos as Array<{ content: string; status: string; priority: string }> : null);
+        break;
+
       case 'step.started':
         setStepCount(data.step as number);
         setIsThinking(true);
@@ -660,6 +864,7 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
         onStatusChange(false);
         setStreamingText('');
         setIsThinking(false);
+        setIsCompacting(false);
         setPendingAskUser(null);
         setPendingPermission(null);
         // Reload messages to get final persisted state with toolCalls
@@ -704,7 +909,7 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
       })();
 
       await new Promise((r) => setTimeout(r, 50));
-      await agentApi.runAgent(sessionId, text, { workspacePath, model, provider });
+      await agentApi.runAgent(sessionId, text, { workspacePath, model, provider, remoteProfileId });
       await eventPromise;
     } catch (err: any) {
       if (err.name !== 'AbortError') {
@@ -727,7 +932,7 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
     }
-  }, [input, isRunning, sessionId, workspacePath, model, provider, onStatusChange]);
+  }, [input, isRunning, sessionId, workspacePath, model, provider, onStatusChange, remoteProfileId]);
 
   const handleInterrupt = useCallback(async () => {
     try {
@@ -748,69 +953,136 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
   }, [handleSend]);
 
   // Build the inline conversation flow:
-  // Messages interleaved with tool calls
+  //  PRIMARY   conversation (user ↔ assistant markdown)
+  //  SECONDARY agent activity groups (◎ Inspecting / ● Editing / ◌ Verifying)
+  //  TERTIARY  individual tool rows (collapsed by default)
+  //  DETAIL    expanded arguments/output
   const renderConversation = () => {
     const elements: React.ReactNode[] = [];
+    let lastRenderedFamily: ToolFamily | null = null;
+    let afterContent = false;
 
-    // Render persisted messages
+    const pushActivity = (meta: ToolMeta, calls: TcShape[]) => {
+      if (afterContent || lastRenderedFamily !== meta.family) {
+        const headerLabel = FAMILY_LABELS[meta.family];
+        elements.push(<ActivityHeader key={`h-${calls[0].id}`} label={headerLabel} count={calls.length} />);
+        lastRenderedFamily = meta.family;
+        afterContent = false;
+      }
+      calls.forEach((tc, i) => {
+        const startTime = toolStartTimes.current.get(tc.id);
+        elements.push(
+          <ToolRow key={`tc-${tc.id}-${i}`} tc={tc} startTime={startTime} onFileSelect={onFileSelect} />,
+        );
+      });
+    };
+
+    // Live compaction progress + last-result notice
+    if (isCompacting) {
+      elements.push(<CompactingBanner key="compacting-live" />);
+      afterContent = true;
+    } else if (lastCompaction) {
+      elements.push(<CompactedNotice key="compacted-notice" tokensSaved={lastCompaction.tokensSaved} />);
+      afterContent = true;
+    }
+
+    // Persistent todo list — shown at the top while the agent works
+    if (todos && todos.length > 0) {
+      elements.push(<TodoList key="todo-list" todos={todos} />);
+      afterContent = true;
+    }
+
     messages.forEach((msg) => {
       if (msg.role === 'user') {
+        afterContent = true;
+        lastRenderedFamily = null;
         elements.push(
           <div key={msg.id} className="flex justify-end">
-            <div className="max-w-[85%] rounded-lg bg-primary/10 border border-primary/20 px-3 py-2 text-sm text-foreground">
-              <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+            <div className="max-w-[85%] rounded-2xl rounded-br-md bg-surface-800/90 px-3.5 py-2 text-sm text-ink-primary border border-border/40">
+              <div className="whitespace-pre-wrap break-words leading-relaxed">{msg.content}</div>
             </div>
           </div>
         );
       } else if (msg.role === 'system') {
+        // Engine/agent notices (nudges, errors) — subtle inline status, not a
+        // yellow warning box. Errors get a red tint, everything else stays calm.
+        const isError = /error|failed|aborted|stopping/i.test(msg.content);
+        afterContent = true;
+        lastRenderedFamily = null;
         elements.push(
-          <div key={msg.id} className="flex items-start gap-2 rounded-md bg-yellow-500/5 border border-yellow-500/20 px-3 py-2 text-xs text-yellow-500/80">
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-            <div className="whitespace-pre-wrap break-words">{msg.content}</div>
+          <div
+            key={msg.id}
+            className={cn(
+              'flex items-start gap-1.5 px-1 py-0.5 text-[11px] leading-relaxed',
+              isError ? 'text-red-300/80' : 'text-ink-muted/70',
+            )}
+          >
+            {isError ? (
+              <AlertCircle className="mt-0.5 h-3 w-3 shrink-0 text-red-400/70" />
+            ) : (
+              <Sparkles className="mt-0.5 h-3 w-3 shrink-0 text-primary/50" />
+            )}
+            <div className="min-w-0 whitespace-pre-wrap break-words">{msg.content}</div>
           </div>
         );
       } else if (msg.role === 'tool') {
         // Tool messages are handled by toolCalls on assistant messages, skip
+        afterContent = false;
       } else if (msg.role === 'assistant') {
-        // Render content
+        // Render content (the conversation — PRIMARY)
         if (msg.content) {
+          afterContent = true;
+          lastRenderedFamily = null;
           elements.push(
-            <div key={msg.id} className="space-y-2">
+            <div key={msg.id}>
               <div className="flex items-start gap-2">
-                <Bot className="h-4 w-4 shrink-0 mt-1 text-foreground/60" />
-                <div className="flex-1 min-w-0">
+                <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                  <Bot className="h-3 w-3" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="mb-0.5 text-[11px] font-medium text-ink-muted/80">Smoke Monkey</div>
                   <MarkdownRenderer content={msg.content} onFileSelect={onFileSelect} />
                 </div>
               </div>
             </div>
           );
         }
-        // Render tool calls inline right after the content
+        // Render tool calls as grouped compact activity rows
         if (msg.toolCalls && msg.toolCalls.length > 0) {
-          msg.toolCalls.forEach((tc) => {
-            const startTime = toolStartTimes.current.get(tc.id);
-            elements.push(
-              <InlineToolCard
-                key={`tc-${tc.id}`}
-                tc={tc}
-                startTime={startTime}
-                onFileSelect={onFileSelect}
-              />
-            );
-          });
+          // group consecutive calls into contiguous family runs
+          let run: TcShape[] = [];
+          let runMeta = metaFor(msg.toolCalls[0].toolName);
+          const flushRun = () => {
+            if (run.length > 0) pushActivity(runMeta, run);
+            run = [];
+          };
+          for (const tc of msg.toolCalls) {
+            const m = metaFor(tc.toolName);
+            if (run.length > 0 && (m.family !== runMeta.family || m.familyLabel !== runMeta.familyLabel)) {
+              flushRun();
+            }
+            runMeta = m;
+            run.push(tc);
+          }
+          flushRun();
         }
       }
     });
 
-    // Render streaming text
+    // Render streaming text (PRIMARY)
     if (streamingText) {
+      afterContent = true;
+      lastRenderedFamily = null;
       elements.push(
-        <div key="streaming" className="space-y-2">
+        <div key="streaming">
           <div className="flex items-start gap-2">
-            <Bot className="h-4 w-4 shrink-0 mt-1 text-foreground/60" />
-            <div className="flex-1 min-w-0">
+            <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+              <Bot className="h-3 w-3" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="mb-0.5 text-[11px] font-medium text-ink-muted/80">Smoke Monkey</div>
               <MarkdownRenderer content={streamingText} onFileSelect={onFileSelect} />
-              <span className="inline-block w-1.5 h-4 bg-foreground/50 animate-pulse ml-0.5 align-text-bottom" />
+              <span className="ml-0.5 inline-block h-3.5 w-1.5 bg-foreground/50 align-text-bottom animate-pulse-soft" />
             </div>
           </div>
         </div>
@@ -823,9 +1095,13 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
       const hasLiveTools = lastMsg?.role === 'assistant' && lastMsg.toolCalls?.some((tc) => tc.status === 'running');
       if (!hasLiveTools) {
         elements.push(
-          <div key="thinking" className="flex items-start gap-2">
-            <Bot className="h-4 w-4 shrink-0 mt-1 text-foreground/60" />
-            <ThinkingIndicator />
+          <div key="thinking">
+            <div className="flex items-start gap-2 px-1 py-0.5">
+              <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                <Bot className="h-3 w-3" />
+              </span>
+              <ThinkingIndicator />
+            </div>
           </div>
         );
       }
@@ -836,18 +1112,17 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
 
   return (
     <div className="flex h-full flex-col bg-background">
-      {/* Chat header: current chat + history toggle */}
-      <div className="relative flex h-10 shrink-0 items-center gap-2 border-b border-border/40 px-3">
-        <MessageSquare className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
-        <span className="min-w-0 flex-1 truncate text-xs font-medium text-foreground/85">
-          {sessions.find((s) => s.id === activeSessionId)?.title || 'New chat'}
+      {/* Chat header */}
+      <div className="relative flex h-9 shrink-0 items-center gap-1.5 border-b border-border/40 px-3">
+        <span className="min-w-0 flex-1 truncate pl-1 text-xs font-medium text-foreground/85">
+          {sessions.find((s) => s.id === activeSessionId)?.title || 'Smoke Monkey'}
         </span>
         {onNewSession && (
           <button
             onClick={onNewSession}
             title="New chat"
             aria-label="New chat"
-            className="glass-hover rounded p-1 text-ink-muted transition-colors hover:text-foreground"
+            className="glass-hover rounded-md p-1 text-ink-muted transition-colors hover:text-foreground"
           >
             <Plus className="h-3.5 w-3.5" />
           </button>
@@ -859,7 +1134,7 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
             aria-label="Chat history"
             aria-expanded={historyOpen}
             className={cn(
-              'glass-hover rounded p-1 transition-colors',
+              'glass-hover rounded-md p-1 transition-colors',
               historyOpen ? 'text-foreground' : 'text-ink-muted hover:text-foreground',
             )}
           >
@@ -924,7 +1199,7 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
         )}
       </div>
 
-      {/* Status bar */}
+      {/* Status line */}
       <AgentStatusIndicator
         stepCount={stepCount}
         duration={duration}
@@ -935,7 +1210,7 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
 
       {/* Toolbar */}
       {!isRunning && messages.length > 0 && (
-        <div className="flex items-center justify-end px-4 py-1 border-b border-border/30">
+        <div className="flex items-center justify-end px-4 py-1">
           <button
             onClick={async () => {
               try {
@@ -957,49 +1232,47 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto px-4 py-4 space-y-3 scrollbar-thin"
+        className="flex-1 overflow-y-auto px-4 py-4 space-y-1.5 scrollbar-thin"
       >
         {messages.length === 0 && !streamingText && !isRunning && (
-          <div className="flex flex-col items-center justify-center h-full text-ink-muted">
-            <div className="text-center space-y-3 max-w-sm">
-              <div className="mx-auto h-12 w-12 rounded-xl glass-panel flex items-center justify-center">
-                <Send className="h-5 w-5 text-ink-muted/50" />
-              </div>
-              <h3 className="text-sm font-medium text-foreground/80">Ask anything</h3>
-              <p className="text-xs text-ink-muted/70 leading-relaxed">
-                Read code, fix bugs, add features, run tests, or explore your codebase.
-              </p>
-              <div className="grid grid-cols-2 gap-1.5 mt-3">
-                {[
-                  'Read the project structure',
-                  'Find and fix bugs',
-                  'Add a new feature',
-                  'Run tests',
-                ].map((prompt) => (
-                  <button
-                    key={prompt}
-                    onClick={() => { setInput(prompt); inputRef.current?.focus(); }}
-                    className="rounded-md glass-panel px-2.5 py-2 text-[11px] text-ink-muted glass-hover transition-colors text-left"
-                  >
-                    {prompt}
-                  </button>
-                ))}
-              </div>
-              <button
-                onClick={async () => {
-                  try {
-                    if (window.__TAURI_INTERNALS__) {
-                      await window.__TAURI_INTERNALS__.invoke('open_in_ide', { workspacePath });
-                    }
-                  } catch (e) {
-                    console.error('Failed to open in IDE:', e);
-                  }
-                }}
-                className="mt-3 flex items-center gap-1.5 rounded-md glass-panel px-3 py-2 text-[11px] text-ink-muted glass-hover transition-colors"
-              >
-                <Code2 className="h-3 w-3" /> Open in Smoke Monkey IDE
-              </button>
+          <div className="flex flex-col items-center justify-center h-full text-center">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
+              <Sparkles className="h-4 w-4 text-primary" />
             </div>
+            <h3 className="mt-3 text-sm font-medium text-foreground/85">Smoke Monkey</h3>
+            <p className="mt-1 max-w-xs text-xs text-ink-muted/70 leading-relaxed">
+              Build, debug, and modify your codebase.
+            </p>
+            <div className="mt-4 grid w-full max-w-sm grid-cols-2 gap-1.5">
+              {[
+                'Fix the failing tests',
+                'Explain this code',
+                'Add a feature',
+                'Find a bug',
+              ].map((prompt) => (
+                <button
+                  key={prompt}
+                  onClick={() => { setInput(prompt); inputRef.current?.focus(); }}
+                  className="rounded-lg border border-border/50 bg-surface-900/60 px-2.5 py-2 text-left text-[11px] text-ink-muted transition-colors hover:border-primary/30 hover:text-foreground"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={async () => {
+                try {
+                  if (window.__TAURI_INTERNALS__) {
+                    await window.__TAURI_INTERNALS__.invoke('open_in_ide', { workspacePath });
+                  }
+                } catch (e) {
+                  console.error('Failed to open in IDE:', e);
+                }
+              }}
+              className="mt-4 flex items-center gap-1.5 rounded-md border border-border/40 px-3 py-1.5 text-[11px] text-ink-muted transition-colors hover:text-foreground"
+            >
+              <Code2 className="h-3 w-3" /> Open in Smoke Monkey IDE
+            </button>
           </div>
         )}
 
@@ -1010,24 +1283,24 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
 
       {/* Permission request */}
       {pendingPermission && (
-        <div className="mx-4 mb-2 rounded-md border border-yellow-500/30 bg-yellow-500/5 p-3">
-          <div className="flex items-center gap-2 mb-2">
-            <AlertTriangle className="h-3.5 w-3.5 text-yellow-500" />
+        <div className="mx-4 mb-2 rounded-lg border border-yellow-500/25 bg-yellow-500/[0.06] px-3 py-2">
+          <div className="flex items-center gap-2 mb-1.5">
+            <AlertCircle className="h-3.5 w-3.5 text-yellow-500/80" />
             <p className="text-xs font-medium">
-              Allow <span className="font-mono text-yellow-500">{pendingPermission.toolName}</span>?
+              Allow <span className="font-mono text-yellow-500/90">{pendingPermission.toolName}</span>?
             </p>
           </div>
-          <pre className="text-[11px] text-ink-muted max-h-16 overflow-y-auto mb-2 glass-panel rounded p-2">
+          <pre className="max-h-16 overflow-y-auto mb-2 rounded bg-black/30 p-2 text-[11px] text-ink-muted font-mono">
             {JSON.stringify(pendingPermission.args, null, 2).slice(0, 300)}
           </pre>
-          <div className="flex gap-2">
+          <div className="flex gap-1.5">
             <button onClick={async () => {
               if (pendingPermission) {
                 await agentApi.resolvePermission(pendingPermission.toolCallId, 'allow');
                 setPendingPermission(null);
               }
             }}
-              className="flex items-center gap-1 rounded bg-green-600 px-3 py-1 text-xs text-white hover:bg-green-700 transition-colors">
+              className="flex items-center gap-1 rounded-md bg-green-600 px-2.5 py-1 text-[11px] text-white hover:bg-green-700 transition-colors">
               <Check className="h-3 w-3" /> Allow
             </button>
             <button onClick={async () => {
@@ -1036,135 +1309,82 @@ export function AgentChat({ sessionId, workspacePath, isRunning, onStatusChange,
                 setPendingPermission(null);
               }
             }}
-              className="flex items-center gap-1 rounded bg-red-600 px-3 py-1 text-xs text-white hover:bg-red-700 transition-colors">
+              className="flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-[11px] text-white hover:bg-red-700 transition-colors">
               <X className="h-3 w-3" /> Deny
             </button>
           </div>
         </div>
       )}
 
-      {/* Ask user request */}
-      {pendingAskUser && (
-        <div className="sticky top-0 z-10 mx-4 mb-2 rounded-md border border-blue-500/50 bg-blue-500/10 p-4 shadow-lg shadow-blue-500/10 backdrop-blur-sm">
-          <div className="flex items-center gap-2 mb-3">
-            <div className="h-8 w-8 rounded-full bg-blue-500/20 flex items-center justify-center">
-              <MessageSquare className="h-4 w-4 text-blue-500" />
-            </div>
-            <div>
-              <p className="text-sm font-semibold text-foreground">Agent needs your input</p>
-              <p className="text-[11px] text-ink-muted">Choose an option or type your response below</p>
+      {/* Ask user dialog */}
+      <AskUserDialog
+        open={!!pendingAskUser}
+        question={pendingAskUser?.question || ''}
+        options={pendingAskUser?.options || []}
+        multiple={Boolean(pendingAskUser?.multiple)}
+        onResolve={async (response) => {
+          if (pendingAskUser) {
+            await agentApi.resolveAskUser(pendingAskUser.toolCallId, response);
+            setPendingAskUser(null);
+          }
+        }}
+        onDismiss={() => setPendingAskUser(null)}
+      />
+
+      {/* Composer */}
+      <div className="border-t border-border/40">
+        <div className="p-2.5">
+          <div className="mb-1.5 flex h-6 items-center gap-1.5 px-0.5">
+            {providers.length > 0 && onModelChange && (
+              <ModelPicker
+                providers={providers}
+                provider={provider || 'ollama'}
+                model={model || 'qwen3:8b'}
+                onChange={onModelChange}
+                compact
+              />
+            )}
+            <div className="ml-auto flex items-center">
+              {needsKey && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-warning/10 px-2 py-0.5 text-[10px] font-medium text-warning">
+                  <KeyRound className="h-3 w-3" />
+                  Key required
+                </span>
+              )}
             </div>
           </div>
-          <p className="text-sm text-ink mb-3 leading-relaxed">{pendingAskUser.question}</p>
-          {pendingAskUser.options.length > 0 ? (
-            <div className="space-y-2">
-              {pendingAskUser.options.map((opt, idx) => (
-                <button key={idx} onClick={async () => {
-                  await agentApi.resolveAskUser(pendingAskUser.toolCallId, opt.label);
-                  setPendingAskUser(null);
-                }}
-                  className="w-full text-left rounded-lg glass-panel border border-border/50 p-3 hover:border-blue-500/50 hover:bg-blue-500/10 active:bg-blue-500/20 transition-all cursor-pointer">
-                  <p className="text-xs font-medium text-foreground">{opt.label}</p>
-                  <p className="text-[11px] text-ink-muted mt-0.5">{opt.description}</p>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="flex gap-2">
-              <input
-                type="text"
-                id="ask-user-input"
-                autoFocus
-                className="flex-1 rounded-lg glass-panel px-3 py-2.5 text-sm placeholder:text-ink-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                placeholder="Type your answer..."
-                onKeyDown={async (e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    const val = (e.target as HTMLInputElement).value.trim();
-                    if (val) {
-                      await agentApi.resolveAskUser(pendingAskUser.toolCallId, val);
-                      setPendingAskUser(null);
-                    }
-                  }
-                }}
-              />
-              <button onClick={async () => {
-                const input = document.getElementById('ask-user-input') as HTMLInputElement;
-                const val = input?.value.trim();
-                if (val) {
-                  await agentApi.resolveAskUser(pendingAskUser.toolCallId, val);
-                  setPendingAskUser(null);
-                }
+          <div className="flex items-end gap-1.5">
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={isRunning ? 'Agent is working…' : 'Ask Smoke Monkey…'}
+              disabled={isRunning}
+              rows={1}
+              className="flex-1 max-h-[120px] resize-none rounded-xl border border-border/50 bg-surface-900/70 px-3 py-2 text-sm placeholder:text-ink-muted/40 transition-colors focus:border-primary/40 focus:outline-none disabled:opacity-50"
+              style={{ height: 'auto', minHeight: '38px' }}
+              onInput={(e) => {
+                const target = e.target as HTMLTextAreaElement;
+                target.style.height = 'auto';
+                target.style.height = Math.min(target.scrollHeight, 120) + 'px';
               }}
-                className="flex items-center gap-1 rounded-lg bg-blue-600 px-4 py-2.5 text-sm text-white hover:bg-blue-700 active:bg-blue-800 transition-colors font-medium">
-                Send
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Input area */}
-      <div className="glass-border-top p-3">
-        {/* Model picker + key indicator bar */}
-        <div className="mb-2 flex items-center gap-2">
-          {providers.length > 0 && onModelChange && (
-            <ModelPicker
-              providers={providers}
-              provider={provider || 'ollama'}
-              model={model || 'qwen3:8b'}
-              onChange={onModelChange}
-              compact
             />
-          )}
-          {needsKey && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-warning/10 px-2 py-0.5 text-[10px] font-medium text-warning">
-              <KeyRound className="h-3 w-3" />
-              Key required
-            </span>
-          )}
-          {provider && !needsKey && hasKeyForCurrentProvider && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-success/10 px-2 py-0.5 text-[10px] font-medium text-success">
-              <KeyRound className="h-3 w-3" />
-              Key ready
-            </span>
-          )}
-          {!provider || provider === 'ollama' ? (
-            <span className="inline-flex items-center gap-1 rounded-full bg-surface-700 px-2 py-0.5 text-[10px] font-medium text-ink-muted">
-              Local
-            </span>
-          ) : null}
-        </div>
-        <div className="flex items-end gap-2">
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={isRunning ? 'Agent is working...' : 'Ask anything...'}
-            disabled={isRunning}
-            rows={1}
-            className="flex-1 resize-none rounded-md glass-panel px-3 py-2 text-sm placeholder:text-ink-muted/50 focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 min-h-[36px] max-h-[120px]"
-            style={{ height: 'auto', minHeight: '36px' }}
-            onInput={(e) => {
-              const target = e.target as HTMLTextAreaElement;
-              target.style.height = 'auto';
-              target.style.height = Math.min(target.scrollHeight, 120) + 'px';
-            }}
-          />
-          {isRunning ? (
-            <button onClick={handleInterrupt}
-              className="flex items-center gap-1 rounded bg-red-600 px-2.5 py-2 text-xs text-white hover:bg-red-700 transition-colors shrink-0">
-              <Square className="h-3 w-3" />
-            </button>
-          ) : (
-            <button onClick={handleSend} disabled={!input.trim()}
-              className="flex items-center gap-1 rounded bg-primary px-2.5 py-2 text-xs text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-30 shrink-0">
-              <Send className="h-3 w-3" />
-            </button>
-          )}
-        </div>
-        <div className="mt-1.5 flex items-center text-[10px] text-ink-muted/40">
-          <span>Enter to send · Shift+Enter for new line</span>
+            {isRunning ? (
+              <button onClick={handleInterrupt} title="Stop"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-red-600/90 text-white transition-colors hover:bg-red-700">
+                <Square className="h-3.5 w-3.5" />
+              </button>
+            ) : (
+              <button onClick={handleSend} disabled={!input.trim()} title="Send"
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary text-primary-foreground transition-all hover:bg-primary-hover disabled:opacity-30">
+                <Send className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+          <div className="mt-1.5 px-1 text-[10px] text-ink-muted/35">
+            Enter to send · Shift+Enter for new line
+          </div>
         </div>
       </div>
     </div>

@@ -9,6 +9,7 @@ import {
   Terminal as TerminalIcon,
   Settings,
   PanelLeft,
+  Plug,
 } from 'lucide-react';
 import { useWorkspace, type ActivityPanel } from '../../hooks/useWorkspace';
 import { cn } from '../../lib/utils';
@@ -25,6 +26,7 @@ const PANEL_ITEMS: { panel: ActivityPanel; icon: typeof Files; label: string; ke
   { panel: 'scm', icon: GitBranch, label: 'Source Control', key: 'scm' },
   { panel: 'agent', icon: MessageSquare, label: 'Agent', key: 'agent' },
   { panel: 'terminal', icon: TerminalIcon, label: 'Terminal', key: 'terminal' },
+  { panel: 'ssh', icon: Plug, label: 'SSH', key: 'ssh' },
 ];
 
 export const ActivityBar = memo(function ActivityBar({ isAgentRunning, gitChangeCount, onToggleGlobalNav }: ActivityBarProps) {

@@ -21,25 +21,30 @@ import { AgentMessage } from './entities/agent-message.entity';
 import { AgentFileChange } from './entities/agent-file-change.entity';
 import { AgentPermission } from './entities/agent-permission.entity';
 import { ToolRegistry } from './tools/tool-registry';
-import { getReadFileTool, getWriteFileTool, getEditFileTool, getApplyPatchTool, getDeleteFileTool, getListDirectoryTool } from './tools/filesystem.tools';
+import { getReadFileTool, getWriteFileTool, getEditFileTool, getReplaceLinesTool, getApplyPatchTool, getDeleteFileTool, getListDirectoryTool } from './tools/filesystem.tools';
 import { getRunCommandTool, getRunTestTool, getDockerExecTool, getDockerListTool } from './tools/terminal.tools';
 import { getGlobTool, getGrepTool, getFindSymbolTool, getSearchCodeTool } from './tools/search.tools';
 import { getGitStatusTool, getGitDiffTool, getGitLogTool } from './tools/git.tools';
 import { getTodoWriteTool, getAskUserTool } from './tools/agent.tools';
+import { getSshRunTool } from './tools/ssh.tools';
 import { AuthModule } from '../auth/auth.module';
 import { ApiKeysModule } from '../keys/api-keys.module';
+import { SshModule } from '../ssh/ssh.module';
+import { ConnectorRegistry } from '../ssh/connector.registry';
 
 const toolRegistryProvider = {
   provide: ToolRegistry,
-  useFactory: () => {
+  inject: [ConnectorRegistry],
+  useFactory: (connectors: ConnectorRegistry) => {
     const registry = new ToolRegistry();
     registry.register(getReadFileTool());
     registry.register(getWriteFileTool());
     registry.register(getEditFileTool());
+    registry.register(getReplaceLinesTool());
     registry.register(getApplyPatchTool());
     registry.register(getDeleteFileTool());
     registry.register(getListDirectoryTool());
-    registry.register(getRunCommandTool());
+    registry.register(getRunCommandTool(connectors));
     registry.register(getRunTestTool());
     registry.register(getDockerExecTool());
     registry.register(getDockerListTool());
@@ -52,6 +57,7 @@ const toolRegistryProvider = {
     registry.register(getGitLogTool());
     registry.register(getTodoWriteTool());
     registry.register(getAskUserTool());
+    registry.register(getSshRunTool(connectors));
     return registry;
   },
 };
@@ -67,6 +73,7 @@ const eventEmitterProvider = {
     EventEmitterModule.forRoot(),
     AuthModule,
     ApiKeysModule,
+    SshModule,
     TypeOrmModule.forFeature([
       AgentSession,
       AgentRun,

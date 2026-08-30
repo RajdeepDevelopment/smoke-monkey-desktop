@@ -14,6 +14,11 @@ export class HealthController {
 
   @Get()
   async check() {
+    return { status: 'ok', timestamp: new Date().toISOString() };
+  }
+
+  @Get('detailed')
+  async detailedCheck() {
     const checks: Record<string, boolean> = { database: false, redis: false, nats: false };
     try {
       await this.dataSource.query('SELECT 1');

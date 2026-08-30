@@ -113,6 +113,7 @@ export const agentApi = {
     model?: string;
     provider?: string;
     workspacePath?: string;
+    remoteProfileId?: string;
   }) =>
     agentRequest<{ status: string; sessionId: string }>(`/api/agent/sessions/${sessionId}/run`, {
       method: 'POST',

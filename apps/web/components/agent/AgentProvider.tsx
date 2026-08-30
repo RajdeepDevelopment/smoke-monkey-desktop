@@ -28,6 +28,15 @@ interface AgentState {
     toolName: string;
     args: unknown;
   };
+  /** True while the agent is summarizing/compacting old context. */
+  isCompacting: boolean;
+  /** Last compaction result for UI transparency. */
+  lastCompaction?: {
+    tokensBefore: number;
+    tokensAfter: number;
+    tokensSaved: number;
+    messagesCompacted: number;
+  };
 }
 
 interface AgentContextValue {
@@ -49,6 +58,7 @@ export function AgentProvider({ sessionId, children }: { sessionId: string; chil
     activeTools: new Map(),
     stepCount: 0,
     duration: 0,
+    isCompacting: false,
   });
 
   const abortRef = useRef<AbortController | null>(null);
@@ -80,6 +90,8 @@ export function AgentProvider({ sessionId, children }: { sessionId: string; chil
           duration: 0,
           streamingText: '',
           activeTools: new Map(),
+          isCompacting: false,
+          lastCompaction: undefined,
           error: undefined,
         }));
         durationIntervalRef.current = setInterval(() => {
@@ -88,6 +100,26 @@ export function AgentProvider({ sessionId, children }: { sessionId: string; chil
             duration: Math.floor((Date.now() - agentStartTimeRef.current) / 1000),
           }));
         }, 1000);
+        break;
+
+      case 'compaction.started':
+        setState(prev => ({
+          ...prev,
+          isCompacting: true,
+        }));
+        break;
+
+      case 'compaction.completed':
+        setState(prev => ({
+          ...prev,
+          isCompacting: false,
+          lastCompaction: {
+            tokensBefore: data.tokensBefore as number,
+            tokensAfter: data.tokensAfter as number,
+            tokensSaved: data.tokensSaved as number,
+            messagesCompacted: data.messagesCompacted as number,
+          },
+        }));
         break;
 
       case 'text.delta':
@@ -197,6 +229,7 @@ export function AgentProvider({ sessionId, children }: { sessionId: string; chil
           status: type === 'run.failed' ? 'error' : 'done',
           streamingText: '',
           activeTools: new Map(),
+          isCompacting: false,
           error: type === 'run.failed' ? (data.error as string) : undefined,
         }));
         agentStartTimeRef.current = 0;

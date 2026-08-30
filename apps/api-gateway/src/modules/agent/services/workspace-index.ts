@@ -134,11 +134,33 @@ export class WorkspaceIndex {
    * Uses SQLite for persistence — subsequent opens skip full re-index.
    */
   async build(rootPath: string, force = false): Promise<void> {
-    if (this.building) return;
-    if (!force && this.built && Date.now() - this.lastBuild < DEBOUNCE_MS) return;
+    if (this.building) {
+      // A build is already in flight — wait until it settles, then re-check.
+      const deadline = Date.now() + 30_000;
+      while (this.building && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (this.building) {
+        this.logger.warn('WorkspaceIndex build stalled (waited 30s) — continuing');
+        return;
+      }
+    }
+    if (!force && this.built && Date.now() - this.lastBuild < DEBOUNCE_MS && this.rootPath === path.resolve(rootPath)) return;
 
     // Resolve canonical path for consistent workspace IDs.
     const canonical = await fsp.realpath(rootPath).catch(() => path.resolve(rootPath));
+
+    // Switching workspaces: reset so the NEW workspace gets indexed.
+    if (this.rootPath && this.rootPath !== canonical) {
+      this.stopWatching();
+      if (this.db) {
+        this.db.close();
+        this.db = null;
+      }
+      this.built = false;
+      this.logger.log(`WorkspaceIndex switching workspace: ${this.rootPath} → ${canonical}`);
+    }
+
     this.rootPath = canonical;
     this.workspaceId = workspaceIdFromPath(canonical);
 

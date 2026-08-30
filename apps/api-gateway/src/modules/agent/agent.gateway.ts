@@ -153,9 +153,9 @@ export class AgentGateway implements OnGatewayInit, OnGatewayConnection, OnGatew
   @SubscribeMessage('run')
   async handleRun(
     @ConnectedSocket() client: AuthenticatedSocket,
-    @MessageBody() data: { sessionId: string; message: string; workspacePath?: string },
+    @MessageBody() data: { sessionId: string; message: string; workspacePath?: string; remoteProfileId?: string },
   ) {
-    const { sessionId, message, workspacePath } = data;
+    const { sessionId, message, workspacePath, remoteProfileId } = data;
 
     try {
       await this.agentService.run({
@@ -164,6 +164,7 @@ export class AgentGateway implements OnGatewayInit, OnGatewayConnection, OnGatew
         message,
         workspacePath: workspacePath || process.cwd(),
         agentId: 'smoke-monkey-agent',
+        remoteProfileId,
       });
 
       return { type: 'run_started', sessionId };

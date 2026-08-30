@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { ChevronRight, ChevronDown, Copy, Check } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { AnsiText } from '../../lib/ansi';
 
 interface Props {
   content: string;
@@ -69,7 +70,7 @@ export function ToolOutput({ content, className }: Props) {
                 'max-h-48 overflow-y-auto whitespace-pre-wrap break-all rounded bg-background/50 p-2',
                 part.isCode && 'font-mono',
               )}>
-                {part.value}
+                <AnsiText text={part.value} />
               </pre>
             </div>
           ))}

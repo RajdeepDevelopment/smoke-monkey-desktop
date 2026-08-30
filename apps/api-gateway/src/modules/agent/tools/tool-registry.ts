@@ -9,8 +9,14 @@ export interface ToolContext {
   workspacePath: string;
   userId: string;
   abortSignal: AbortSignal;
+  /** The ID of the specific tool call being executed (for event routing). */
+  toolCallId?: string;
   /** SQLite-backed workspace index for fast symbol/reference lookups. */
   workspaceIndex?: import('../services/workspace-index').WorkspaceIndex;
+  /** Event emitter for real-time UI updates (tool.output, todo.updated, etc.). */
+  eventEmitter?: import('../services/agent-event.emitter').AgentEventEmitter;
+  /** When set, commands should execute on the remote host (SSH profile). */
+  remoteSsh?: { destinationId: string; userId: string };
 }
 
 export interface ToolContent {
