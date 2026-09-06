@@ -1,3 +1,4 @@
+
 import {
   BadRequestException,
   Injectable,
@@ -315,7 +316,7 @@ export class ApiKeysService {
           'content-type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'nvidia/nemotron-3-nano-30b-a3b',
+          model: 'nvidia/nemotron-3-super-120b-a12b',
           messages: [{ role: 'user', content: 'ping' }],
           max_tokens: 1,
         }),

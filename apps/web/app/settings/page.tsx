@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BrainCircuit,
   Globe,
@@ -8,13 +8,17 @@ import {
   Layers,
   Loader2,
   Lock,
+  Monitor,
   Settings,
   ShieldCheck,
   Zap,
 } from 'lucide-react';
 import type {
+  HuggingFaceStatusDto,
   ModelPreset,
   ModelsResponseDto,
+  OmniRouteModelDto,
+  OmniRouteStatusDto,
   SaveKeyResultDto,
   UserKeyDto,
 } from '@rag/contracts';
@@ -23,8 +27,12 @@ import { useAuth } from '../../components/AuthProvider';
 import { PageScroll } from '../../components/PageScroll';
 import { PageHeader } from '../../components/PageHeader';
 import { StatusBadge } from '../../components/StatusBadge';
+import { BrandIconFor } from '../../components/BrandIconResolver';
 import { useToast } from '../../components/Toast';
 import { Switch } from '../../components/ui/switch';
+import { ModeSwitcher } from '../../components/workspace/ModeSwitcher';
+import { OnboardingWizard } from '../../components/onboarding/OnboardingWizard';
+import type { UiMode } from '../../hooks/useWorkspace';
 import { cn } from '../../lib/utils';
 
 interface ProviderMeta {
@@ -40,10 +48,10 @@ const PROVIDERS: ProviderMeta[] = [
   {
     id: 'omniroute',
     label: 'OmniRoute (Free)',
-    hint: 'Free mode is built into the app — no OmniRoute install needed. Add any free provider key here (NVIDIA/OpenRouter/OpenCode) or an OmniRoute key and free mode uses it.',
-    placeholder: 'any free key',
+    hint: 'Local gateway serving 100+ free, keyless models. Start it with omniRoute, open http://localhost:20128, log in (default password "change me"), create an API key in API Key / Endpoints, then paste it here. Leave this blank to use the keyless default.',
+    placeholder: 'optional — keyless works without one',
     keyStart: '',
-    getKeyUrl: 'https://build.nvidia.com',
+    getKeyUrl: 'http://localhost:20128',
   },
   {
     id: 'openrouter',
@@ -223,7 +231,10 @@ function WebSearchToggle() {
 function OmniRouteToggle() {
   const [omniroute, setOmniroute] = useState<{ serverEnabled: boolean; enabled: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<OmniRouteStatusDto | null>(null);
+  const [statusLoaded, setStatusLoaded] = useState(false);
   const [gateway, setGateway] = useState<{ reachable: boolean; models: number } | null>(null);
+  const [omniModels, setOmniModels] = useState<OmniRouteModelDto[]>([]);
   const toast = useToast();
 
   useEffect(() => {
@@ -233,13 +244,53 @@ function OmniRouteToggle() {
       .catch(() => setOmniroute({ serverEnabled: false, enabled: false }));
   }, []);
 
+  // Poll the live OmniRoute provisioning lifecycle. While it is initializing
+  // (installing/starting/syncing after login) we show a loader and block the
+  // toggle; once ready the gateway is signed in with the SM credentials.
+  const statusRef = useRef<OmniRouteStatusDto | null>(status);
+  statusRef.current = status;
   useEffect(() => {
-    if (!omniroute?.enabled) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const check = async () => {
+      try {
+        const s = await api.fetchOmniRouteStatus();
+        if (!cancelled) {
+          setStatus(s);
+          setStatusLoaded(true);
+        }
+      } catch {
+        if (!cancelled) setStatusLoaded(true);
+      }
+    };
+    void check();
+    timer = setInterval(() => {
+      const s = statusRef.current;
+      if (s?.ready && s.reachable) {
+        clearInterval(timer);
+        return;
+      }
+      void check();
+    }, 1600);
+    return () => {
+      cancelled = true;
+      if (timer) clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!omniroute?.enabled || status?.installing || status?.starting || status?.syncing) return;
     api
       .fetchOmniRouteModels()
-      .then((res) => setGateway({ reachable: res.reachable, models: res.models.length }))
-      .catch(() => setGateway({ reachable: false, models: 0 }));
-  }, [omniroute?.enabled]);
+      .then((res) => {
+        setGateway({ reachable: res.reachable, models: res.models.length });
+        setOmniModels(res.models);
+      })
+      .catch(() => {
+        setGateway({ reachable: false, models: 0 });
+        setOmniModels([]);
+      });
+  }, [omniroute?.enabled, status?.installing, status?.starting, status?.syncing]);
 
   const toggle = async (enabled: boolean) => {
     setBusy(true);
@@ -247,6 +298,7 @@ function OmniRouteToggle() {
       const res = await api.setOmniRouteEnabled(enabled);
       setOmniroute(res.omniroute);
       setGateway(enabled ? { reachable: false, models: 0 } : null);
+      setOmniModels(enabled ? [] : []);
       toast.success(enabled ? 'OmniRoute free mode is on' : 'OmniRoute free mode is off');
     } catch (err) {
       toast.error('Could not update OmniRoute', (err as Error).message);
@@ -257,6 +309,10 @@ function OmniRouteToggle() {
 
   const serverEnabled = omniroute?.serverEnabled ?? false;
   const enabled = omniroute?.enabled ?? false;
+  const initializing =
+    serverEnabled &&
+    (status?.installing || status?.starting || status?.syncing || (!statusLoaded && enabled));
+  const failed = status?.status === 'error';
 
   return (
     <div className="card p-4 sm:p-5">
@@ -268,17 +324,17 @@ function OmniRouteToggle() {
           <div>
             <h3 className="text-sm font-semibold text-ink-primary">Free OmniRoute gateway</h3>
             <p className="mt-0.5 text-xs leading-relaxed text-ink-muted">
-              100+ free, keyless models (Kimi, Claude, GPT, Gemini, DeepSeek…) through a local
-              OpenAI-compatible proxy — no API key needed. Also used automatically whenever your
-              provider key runs out of credits.
+              {initializing
+                ? 'Getting OmniRoute ready. It signs in automatically with your Smoke Monkey credentials — no extra setup needed.'
+                : '100+ free, keyless models (Kimi, Claude, GPT, Gemini, DeepSeek…) through a local OpenAI-compatible proxy — no API key needed. Also used automatically whenever your provider key runs out of credits.'}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {busy && <Loader2 className="h-4 w-4 animate-spin text-ink-muted" />}
+          {(busy || initializing) && <Loader2 className="h-4 w-4 animate-spin text-ink-muted" />}
           <Switch
             checked={enabled}
-            disabled={!serverEnabled || busy}
+            disabled={!serverEnabled || busy || initializing}
             onCheckedChange={(v) => void toggle(v)}
             aria-label="Toggle free OmniRoute gateway"
           />
@@ -293,13 +349,36 @@ function OmniRouteToggle() {
           </code>{' '}
           in the environment.
         </p>
+      ) : initializing ? (
+        <div className="mt-4 space-y-2">
+          <div className="flex items-center gap-2.5 rounded-lg border border-primary/20 bg-primary-subtle px-3 py-2.5">
+            <Loader2 className="h-4 w-4 animate-spin text-primary-hover" />
+            <span className="text-xs font-medium text-ink-primary">
+              Initializing OmniRoute…
+            </span>
+            <span className="text-xs text-ink-muted">
+              {status?.installing
+                ? 'bundling the free gateway'
+                : status?.starting
+                  ? 'starting the local gateway'
+                  : status?.syncing
+                    ? 'signing in with your Smoke Monkey credentials'
+                    : 'please wait'}
+            </span>
+          </div>
+        </div>
       ) : (
         <div className="mt-4 space-y-2">
+          {failed && status?.error && (
+            <p className="rounded-lg border border-error/30 bg-error-subtle px-3 py-2.5 text-xs leading-relaxed text-red-300">
+              OmniRoute could not initialize: {status.error}
+            </p>
+          )}
           {gateway ? (
             <StatusBadge
               label={
                 gateway.reachable
-                  ? `On — gateway reachable, ${gateway.models} free models available`
+                  ? `On — gateway reachable, ${gateway.models} models available`
                   : 'On — gateway not reachable yet (is OmniRoute running on localhost:20128?)'
               }
               tone={gateway.reachable ? 'success' : 'warning'}
@@ -309,6 +388,41 @@ function OmniRouteToggle() {
               label={enabled ? 'On — questions may also fall back to free models' : 'Off — your own provider keys only'}
               tone={enabled ? 'success' : 'neutral'}
             />
+          )}
+
+          {omniModels.length > 0 && (
+            <div className="rounded-lg border border-surface-800 bg-surface-900/40">
+              <div className="flex items-center justify-between border-b border-surface-800 px-3 py-2">
+                <span className="text-[11px] font-semibold uppercase tracking-widest text-ink-muted">
+                  Available models
+                </span>
+                <span className="rounded-full bg-surface-800 px-1.5 py-0.5 text-[10px] font-medium text-ink-secondary">
+                  {omniModels.length}
+                </span>
+              </div>
+              <div className="max-h-64 overflow-y-auto p-2">
+                <ul className="space-y-0.5">
+                  {omniModels.map((m) => (
+                    <li
+                      key={m.id}
+                      className="flex items-center justify-between gap-3 rounded-md px-2 py-1 text-xs hover:bg-surface-800/60"
+                    >
+                      <span className="min-w-0 truncate font-mono text-[11px] text-ink-primary">
+                        {m.id}
+                      </span>
+                      <span
+                        className={cn(
+                          'shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium',
+                          m.isFree ? 'bg-success/10 text-success' : 'bg-surface-800 text-ink-secondary',
+                        )}
+                      >
+                        {m.isFree ? 'free' : 'keyless'}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
           )}
         </div>
       )}
@@ -390,6 +504,7 @@ function KeyCard({ meta, verifies = true }: { meta: ProviderMeta; verifies?: boo
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">
+            <BrandIconFor name={meta.label} size="sm" />
             <h3 className="text-sm font-semibold text-ink-primary">{meta.label}</h3>
             {saved && (
               <span className="rounded-full bg-success/10 px-2 py-0.5 text-[11px] font-medium text-success">
@@ -460,6 +575,170 @@ function KeyCard({ meta, verifies = true }: { meta: ProviderMeta; verifies?: boo
   );
 }
 
+/** Hugging Face token card — stored as a Secret Manager secret named
+ *  "huggingface" (raw AUTH token at huggingface.co/settings/tokens). Unlike the
+ *  /api/keys provider cards it is live-validated against the HF whoami endpoint
+ *  through its own status endpoint. */
+function HuggingFaceCard() {
+  const [status, setStatus] = useState<HuggingFaceStatusDto | null>(null);
+  const [mask, setMask] = useState<string | null>(null);
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      const [s, secretsRes] = await Promise.all([api.fetchHuggingFaceStatus(), api.listSecrets()]);
+      setStatus(s);
+      const secret = secretsRes.secrets.find((k) => k.name === 'huggingface');
+      setMask(secret ? `${secret.keyPrefix}${secret.last4}` : null);
+    } catch {
+      setStatus(null);
+      setMask(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const save = async () => {
+    if (!value.trim()) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await api.saveSecret('huggingface', value.trim());
+      setValue('');
+      setMask(`${res.keyPrefix}${res.last4}`);
+      setMsg({ kind: 'ok', text: 'Hugging Face token saved and verified.' });
+      await refresh();
+    } catch (err) {
+      setMsg({ kind: 'err', text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const test = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await api.testSecret('huggingface');
+      if (res.status === 'invalid') {
+        setMsg({ kind: 'err', text: 'Token is invalid — check it at huggingface.co/settings/tokens.' });
+      } else {
+        setMsg({ kind: 'ok', text: 'Token is valid — you can call Hugging Face models.' });
+      }
+      await refresh();
+    } catch (err) {
+      setMsg({ kind: 'err', text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api.deleteSecret('huggingface');
+      setMask(null);
+      setStatus((s) => (s ? { ...s, configured: false, status: 'invalid' } : s));
+      setMsg({ kind: 'ok', text: 'Token removed.' });
+    } catch (err) {
+      setMsg({ kind: 'err', text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card space-y-3 p-4 sm:p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-semibold text-ink-primary">Hugging Face</h3>
+            {mask && (
+              <span className="rounded-full bg-success/10 px-2 py-0.5 text-[11px] font-medium text-success">
+                {mask}
+              </span>
+            )}
+            {status?.configured && status?.tier && (
+              <span
+                className={cn(
+                  'rounded-full px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide',
+                  status.tier === 'free'
+                    ? 'bg-yellow-400/10 text-yellow-400'
+                    : 'bg-accent/15 text-accent',
+                )}
+              >
+                {status.tier} tier
+              </span>
+            )}
+          </div>
+          <p className="mt-1 text-xs leading-relaxed text-ink-muted">
+            Generate video, voice, image and audio assets with top HF models (Wan, FLUX, Kokoro,
+            MusicGen…) and chat with HF LLMs. Get a token at{' '}
+            <a className="font-medium text-accent hover:underline" href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">
+              huggingface.co/settings/tokens →
+            </a>
+          </p>
+        </div>
+        <div className="flex shrink-0 flex-col items-end gap-1.5">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-surface-850 text-ink-muted">
+            <Key className="h-4 w-4" />
+          </span>
+          {status && (
+            <StatusBadge
+              label={status.status === 'ok' ? 'Valid' : 'Not configured'}
+              tone={status.status === 'ok' ? 'success' : 'neutral'}
+            />
+          )}
+        </div>
+      </div>
+
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void save();
+        }}
+      >
+        <input
+          className="input h-10 flex-1 font-mono text-sm"
+          type="password"
+          placeholder={mask ? 'Replace existing token…' : 'hf_…'}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          autoComplete="off"
+        />
+        <button className="btn-primary h-10 shrink-0" disabled={busy || !value.trim()}>
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save'}
+        </button>
+      </form>
+
+      {mask && (
+        <div className="flex gap-2">
+          <button className="btn-ghost flex-1" onClick={test} disabled={busy}>
+            Test token
+          </button>
+          <button
+            className="btn-ghost flex-1 border-error/30 text-red-300 hover:bg-error-subtle"
+            onClick={remove}
+            disabled={busy}
+          >
+            Remove
+          </button>
+        </div>
+      )}
+
+      {msg && (
+        <p className={cn('text-xs', msg.kind === 'ok' ? 'text-success' : 'text-red-400')}>{msg.text}</p>
+      )}
+    </div>
+  );
+}
+
 function Stars({ rating }: { rating: number }) {
   return (
     <span className="inline-flex items-center gap-0.5">
@@ -475,6 +754,20 @@ function Stars({ rating }: { rating: number }) {
 export default function SettingsPage() {
   const { user } = useAuth();
   const [models, setModels] = useState<ModelsResponseDto | null>(null);
+  const [showSetup, setShowSetup] = useState(false);
+  const [uiMode, setUiModeState] = useState<UiMode>(() => {
+    try {
+      const raw = localStorage.getItem('sm-ui-mode');
+      if (raw === 'simple' || raw === 'dev') return raw;
+    } catch { /* ignore */ }
+    return 'dev';
+  });
+  const setUiMode = (m: UiMode) => {
+    setUiModeState(m);
+    try {
+      localStorage.setItem('sm-ui-mode', m);
+    } catch { /* ignore */ }
+  };
 
   useEffect(() => {
     api.fetchModels().then(setModels).catch(() => setModels(null));
@@ -489,6 +782,7 @@ export default function SettingsPage() {
   );
 
   return (
+    <>
     <PageScroll>
       <div className="mx-auto w-full max-w-3xl space-y-8">
         <PageHeader
@@ -509,6 +803,47 @@ export default function SettingsPage() {
           }
         />
 
+        {/* ── Interface mode ─────────────────────────────────────────── */}
+        <section className="card space-y-3 p-4 sm:p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary-subtle text-primary">
+                <Monitor className="h-5 w-5" />
+              </span>
+              <div>
+                <h3 className="text-sm font-semibold text-ink-primary">Interface</h3>
+                <p className="mt-0.5 max-w-md text-xs leading-relaxed text-ink-muted">
+                  Simple mode hides the IDE internals behind one tap — you just chat and get
+                  results. Developer mode shows the full workspace: files, editor, terminal and
+                  every step. Same agent either way.
+                </p>
+              </div>
+            </div>
+            <ModeSwitcher mode={uiMode} onChange={setUiMode} />
+          </div>
+        </section>
+
+        {/* ── AI Setup (re-run first-run wizard) ─────────────────────────── */}
+        <section className="card space-y-3 p-4 sm:p-5">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary-subtle text-primary">
+                <Settings className="h-5 w-5" />
+              </span>
+              <div>
+                <h3 className="text-sm font-semibold text-ink-primary">AI Setup &amp; onboarding</h3>
+                <p className="mt-0.5 max-w-md text-xs leading-relaxed text-ink-muted">
+                  Choose how to connect your AI — free model gateway, your own provider keys, or
+                  both. Re-open the guided setup anytime to change your preferences.
+                </p>
+              </div>
+            </div>
+            <button type="button" className="btn-primary shrink-0 gap-2 px-4 py-2" onClick={() => setShowSetup(true)}>
+              Re-run setup
+            </button>
+          </div>
+        </section>
+
         {/* ── Provider API keys ─────────────────────────────────────────── */}
         <section className="space-y-3">
           <SectionTitle
@@ -520,6 +855,17 @@ export default function SettingsPage() {
           {PROVIDERS.map((meta) => (
             <KeyCard key={meta.id} meta={meta} />
           ))}
+        </section>
+
+        {/* ── Hugging Face ─────────────────────────────────────────── */}
+        <section className="space-y-3">
+          <SectionTitle
+            icon={<BrainCircuit className="h-5 w-5" />}
+            description="Your Hugging Face token powers media generation (video, voice, image, audio) and HF chat models. It is stored encrypted and only used by you."
+          >
+            Hugging Face assets &amp; models
+          </SectionTitle>
+          <HuggingFaceCard />
         </section>
 
         {/* ── Free OmniRoute gateway ────────────────────────────────────── */}
@@ -671,7 +1017,9 @@ export default function SettingsPage() {
             </div>
           </section>
         )}
-      </div>
-    </PageScroll>
+        </div>
+      </PageScroll>
+      <OnboardingWizard open={showSetup} onClose={() => setShowSetup(false)} />
+    </>
   );
 }

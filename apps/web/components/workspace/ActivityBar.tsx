@@ -10,18 +10,26 @@ import {
   Settings,
   PanelLeft,
   Plug,
+  PlugZap,
 } from 'lucide-react';
 import { useWorkspace, type ActivityPanel } from '../../hooks/useWorkspace';
+import type { RemoteConnectionState } from './StatusBar';
 import { cn } from '../../lib/utils';
 
 interface ActivityBarProps {
   isAgentRunning?: boolean;
   gitChangeCount?: number;
   onToggleGlobalNav?: () => void;
+  /** Simple mode: terminal panel is hidden (dev-only chrome). */
+  simple?: boolean;
+  /** Connection state for the Local/SSH indicator at the bottom of the rail. */
+  remote?: RemoteConnectionState;
+  /** Opens the SSH side panel (connection management lives there). */
+  onOpenSsh?: () => void;
 }
 
 const PANEL_ITEMS: { panel: ActivityPanel; icon: typeof Files; label: string; key: string }[] = [
-  { panel: 'explorer', icon: Files, label: 'Explorer', key: 'explorer' },
+  { panel: 'explorer', icon: Files, label: 'Files', key: 'explorer' },
   { panel: 'search', icon: Search, label: 'Search', key: 'search' },
   { panel: 'scm', icon: GitBranch, label: 'Source Control', key: 'scm' },
   { panel: 'agent', icon: MessageSquare, label: 'Agent', key: 'agent' },
@@ -29,20 +37,39 @@ const PANEL_ITEMS: { panel: ActivityPanel; icon: typeof Files; label: string; ke
   { panel: 'ssh', icon: Plug, label: 'SSH', key: 'ssh' },
 ];
 
-export const ActivityBar = memo(function ActivityBar({ isAgentRunning, gitChangeCount, onToggleGlobalNav }: ActivityBarProps) {
+export const ActivityBar = memo(function ActivityBar({
+  isAgentRunning,
+  gitChangeCount,
+  onToggleGlobalNav,
+  simple = false,
+  remote,
+  onOpenSsh,
+}: ActivityBarProps) {
   const { state, setActivePanel } = useWorkspace();
+
+  const isRemote = Boolean(remote?.connected && remote.profile);
+
+  const handleTerminalClick = () => {
+    setActivePanel('terminal');
+  };
+
+  const handleSshClick = () => {
+    if (onOpenSsh) onOpenSsh();
+    else setActivePanel('ssh');
+  };
 
   return (
     <div className="glass-panel w-12 shrink-0 flex flex-col items-center border-r">
       {/* Main panels */}
       <div className="w-full flex-1 flex flex-col items-center gap-px py-1.5">
-        {PANEL_ITEMS.map(({ panel, icon: Icon, label }) => {
+        {PANEL_ITEMS.filter(({ panel }) => !(simple && panel === 'terminal')).map(({ panel, icon: Icon, label }) => {
           const isActive = state.activePanel === panel && state.sidePanelOpen;
           const showBadge = panel === 'scm' && (gitChangeCount ?? 0) > 0;
+          const onClick = panel === 'terminal' ? handleTerminalClick : panel === 'ssh' ? handleSshClick : () => setActivePanel(panel);
           return (
             <button
               key={panel}
-              onClick={() => setActivePanel(panel)}
+              onClick={onClick}
               className={cn(
                 'relative flex h-10 w-12 items-center justify-center transition-colors',
                 isActive ? 'text-foreground' : 'text-ink-muted hover:text-foreground',
@@ -78,7 +105,7 @@ export const ActivityBar = memo(function ActivityBar({ isAgentRunning, gitChange
         })}
       </div>
 
-      {/* Global nav + Settings */}
+      {/* Global nav + Settings + connection indicator */}
       <div className="w-full flex flex-col items-center border-t glass-border py-1.5">
         {onToggleGlobalNav && (
           <button
@@ -108,6 +135,23 @@ export const ActivityBar = memo(function ActivityBar({ isAgentRunning, gitChange
             )}
             strokeWidth={1.8}
           />
+        </button>
+
+        {/* Local / SSH indicator — bottom of the rail */}
+        <button
+          onClick={handleSshClick}
+          title={isRemote ? `Connected to ${remote!.profile!.name} — click to manage` : 'Local workspace — click to connect'}
+          aria-label={isRemote ? `Connected to ${remote!.profile!.name}` : 'Local workspace'}
+          className="mt-1 flex h-9 w-12 flex-col items-center justify-center gap-1 text-ink-muted transition-colors hover:text-foreground"
+        >
+          {isRemote ? (
+            <PlugZap className="h-[18px] w-[18px] text-emerald-400" strokeWidth={1.8} />
+          ) : (
+            <Plug className="h-[18px] w-[18px]" strokeWidth={1.8} />
+          )}
+          <span className="relative flex h-1.5 w-4 items-center justify-center">
+            <span className={cn('absolute h-1 w-1 rounded-full', isRemote ? 'bg-emerald-400' : 'bg-surface-600')} />
+          </span>
         </button>
       </div>
     </div>

@@ -417,6 +417,28 @@ async def set_omniroute(request: Request, body: _ToggleBody) -> dict[str, Any]:
     }
 
 
+_ONBOARDING_KEY = "rag:user_setting:{user_id}:onboarding_completed"
+
+
+@router.get("/settings/onboarding")
+async def get_onboarding(request: Request) -> dict[str, Any]:
+    """Whether the first-run onboarding wizard has been completed for this user."""
+    _require_local()
+    _conversations, redis = _stores(request)
+    completed = await _read_flag(redis, _ONBOARDING_KEY.format(user_id=_DEFAULT_USER))
+    return {"completed": completed}
+
+
+@router.put("/settings/onboarding")
+async def set_onboarding(request: Request) -> dict[str, Any]:
+    """Mark the first-run onboarding wizard as completed."""
+    _require_local()
+    _conversations, redis = _stores(request)
+    if redis is not None:
+        await redis.set(_ONBOARDING_KEY.format(user_id=_DEFAULT_USER), "1")
+    return {"completed": True}
+
+
 # ── Thin aliases to the /api/v1 handlers ──────────────────────────────────
 
 @router.get("/health")

@@ -7,6 +7,8 @@ import {
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { FileReadCache } from '../services/file-read-cache';
+import { applyLineEdits } from './line-edit';
+import { resolveFilePath, formatResolutionError } from './path-resolver';
 
 const MAX_READ_BYTES = 50 * 1024;
 const MAX_READ_LINES = 800;
@@ -15,6 +17,61 @@ const MAX_LINE_LENGTH = 2000;
 
 /** Shared file read cache — avoids re-reading unchanged files across tool calls. */
 const fileReadCache = new FileReadCache();
+
+/**
+ * Resolution wrapper for the file tools. Every tool hands the requested path
+ * (as the model gave it) through `resolveFilePath`, which searches exact /
+ * parent / inside-project / recursive-filename in one bounded pass and returns
+ * a VERIFIED absolute path. When nothing safe is found, it returns the
+ * "File not found" fragment (with suggested candidates for corrective action)
+ * that the tool surfaces isError to the model — so the model self-corrects on
+ * the next call instead of spending turns probing `../`, `src/`, `apps/`, `packages/`.
+ */
+async function resolveToolPath(
+  workspaceDir: string,
+  requestedPath: string,
+  opts: { forCreate?: boolean; purpose: string },
+): Promise<{ ok: boolean; resolved?: string; error?: string }> {
+  const res = await resolveFilePath(workspaceDir, requestedPath, opts.forCreate);
+  if (res.resolved) {
+    // Report a redirect so the model learns the true location even as the
+    // tool succeeds against it.
+    return { ok: true, resolved: res.resolved };
+  }
+  return { ok: false, error: formatResolutionError(requestedPath, res, opts.purpose) };
+}
+
+// Chunk size for streaming file writes. Big enough to keep WS/SSE chatter low,
+// small enough that a multi-hundred-KB write produces a visible progress pulse.
+const WRITE_STREAM_CHUNK = 16 * 1024;
+
+/**
+ * Emits a live `tool.progress` event for the currently-executing file tool
+ * (no-op when the context has no emitter, e.g. headless/direct invocation).
+ * `toolCallId` is merged by the emitter; callers pass everything else flat.
+ */
+function emitFileProgress(
+  context: ToolContext,
+  progress: {
+    kind: string;
+    path?: string;
+    percent?: number;
+    bytesWritten?: number;
+    bytesTotal?: number;
+    lines?: number;
+    linesTotal?: number;
+    preview?: string;
+    detail?: string;
+  },
+): void {
+  if (!context.eventEmitter || !context.toolCallId) return;
+  context.eventEmitter.emitToolProgress(
+    context.sessionId,
+    context.runId,
+    context.toolCallId,
+    progress as unknown as Record<string, unknown>,
+  );
+}
 
 const BINARY_EXTENSIONS = new Set([
   '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar',
@@ -52,12 +109,14 @@ function truncateLine(line: string, maxLen: number): string {
   return line.substring(0, maxLen) + '...';
 }
 
-// ---------------------------------------------------------------------------
-// Observation policy (ported from deepseek-harness FS_NOT_OBSERVED /
-// FS_STALE_VERSION): a mutation is only allowed on a file THIS session has
-// read, and only while it is unchanged since that read. Failures carry an
-// explicit remedy so the model can self-correct instead of retrying blindly.
-// ---------------------------------------------------------------------------
+/**
+ * Observation policy (softened): the session used to be HARD-BLOCKED from
+ * mutating a file it had not read ("call read_file first, then retry"). That
+ * wasted turns on perfectly valid edits — the model often already knows the
+ * content. Now the mutation still applies, but the tool output gains a note
+ * the model can read. The stale-version check is a warning too: the current
+ * on-disk content is edited as-is, not whatever version the model saw.
+ */
 const observedFiles = new Map<string, string>();
 
 function observeKey(sessionId: string, resolved: string): string {
@@ -79,29 +138,23 @@ async function observeRead(sessionId: string, resolved: string): Promise<void> {
   if (fp !== null) observedFiles.set(observeKey(sessionId, resolved), fp);
 }
 
-function errResult(text: string): ToolResult {
-  return { content: [{ type: 'text', text }], isError: true };
-}
-
-async function assertObserved(
+/** Returns '' when the file is safe to mutate, or a note the caller should
+ * append to its success output (never an error). */
+async function observedWarning(
   sessionId: string,
   resolved: string,
   displayPath: string,
-): Promise<ToolResult | null> {
+): Promise<string> {
   const seen = observedFiles.get(observeKey(sessionId, resolved));
   if (seen === undefined) {
-    return errResult(
-      `Error: ${displayPath} has not been read in this session yet — call read_file on it first, then retry.`,
-    );
+    return `(note: ${displayPath} had not been read this session — the edit was applied directly to the existing file content. Read the file to verify the result if it was out-of-date.)`;
   }
   const now = await currentFingerprint(resolved);
   if (now !== null && now !== seen) {
     observedFiles.delete(observeKey(sessionId, resolved));
-    return errResult(
-      `Error: ${displayPath} changed since it was last read — re-read it, then retry against the current content.`,
-    );
+    return `(note: ${displayPath} changed since it was last read this session — the edit was applied against the current on-disk content, not the stale version. Re-read if the result is unexpected.)`;
   }
-  return null;
+  return '';
 }
 
 /** Models occasionally echo read-style "N: " prefixes inside oldString/newString.
@@ -205,7 +258,8 @@ export function getReadFileTool(): ToolDefinition {
       'Use startLine/endLine for targeted reads (e.g., after grep locates a line). ' +
       'For large files do NOT page through: use startLine/endLine to read only the target region. ' +
       'Binary files (executables, archives, images other than jpg/png/gif/webp) are rejected. ' +
-      'Files must be read before they can be edited in this session.',
+      'Reading a file before editing it is recommended — an edit on an unread file still applies, ' +
+      'but the tool output notes that the content was not verified first.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -259,7 +313,13 @@ export function getReadFileTool(): ToolDefinition {
         return { content: [{ type: 'text', text: 'Error: path is required.' }], isError: true };
       }
 
-      const resolved = path.resolve(context.workspaceDir, filePath);
+      const resolvedResult = await resolveToolPath(context.workspaceDir, filePath, {
+        purpose: 'Re-check the path or use glob/inspect to find the real file.',
+      });
+      if (!resolvedResult.ok) {
+        return { content: [{ type: 'text', text: resolvedResult.error }], isError: true };
+      }
+      const resolved = resolvedResult.resolved;
 
       try {
         const stat = await fs.stat(resolved);
@@ -411,7 +471,14 @@ export function getWriteFileTool(): ToolDefinition {
         return { content: [{ type: 'text', text: 'Error: content must not be empty. Use edit_file to modify existing files.' }], isError: true };
       }
 
-      const resolved = path.resolve(context.workspaceDir, filePath);
+      const resolvedResult = await resolveToolPath(context.workspaceDir, filePath, {
+        forCreate: true,
+        purpose: 'Write a new file at the requested location, or fix the path to an existing file.',
+      });
+      if (!resolvedResult.ok) {
+        return { content: [{ type: 'text', text: resolvedResult.error }], isError: true };
+      }
+      const resolved = resolvedResult.resolved;
 
       try {
         let existed = false;
@@ -420,15 +487,89 @@ export function getWriteFileTool(): ToolDefinition {
           existed = true;
         } catch {}
 
-        // Overwriting an existing file without having read it is how agents
-        // blindly clobber code. New-file creation stays unrestricted.
+        // Overwriting an existing file without having read it used to be blocked.
+        // Now the write just applies and surfaces a note to the model.
+        let observedNote = '';
         if (existed) {
-          const gate = await assertObserved(context.sessionId, resolved, filePath);
-          if (gate) return gate;
+          observedNote = await observedWarning(context.sessionId, resolved, filePath);
         }
 
         await fs.mkdir(path.dirname(resolved), { recursive: true });
-        await fs.writeFile(resolved, content, 'utf-8');
+
+        const contentBuffer = Buffer.from(content, 'utf-8');
+        const contentBytes = contentBuffer.length;
+        const totalLines = content === '' ? 0 : content.split('\n').length;
+
+        // Stream the write chunk-by-chunk, emitting live progress so the UI
+        // shows the file actually being written while this tool is still
+        // running (a 2000-line file should not be silent for a minute).
+        // NOTE: all offsets here are BYTES over a Buffer. The old code mixed a
+        // byte cursor with string (.slice() = UTF-16 code units) indexing,
+        // which made multi-byte content (e.g. box-drawing chars in generated
+        // docs) slice an empty chunk once byteOffset > string.length — the
+        // "write made no progress" failure.
+        emitFileProgress(context, {
+          kind: 'write',
+          path: resolved,
+          percent: 0,
+          bytesWritten: 0,
+          bytesTotal: contentBytes,
+          lines: 0,
+          linesTotal: totalLines,
+          detail: existed ? `Updating ${filePath}` : `Creating ${filePath}`,
+        });
+
+        const handle = await fs.open(resolved, existed ? 'r+' : 'w');
+        try {
+          if (existed) {
+            // r+ truncates only on demand — wipe old content so a shorter
+            // payload cannot leave stale trailing bytes.
+            await handle.truncate(0);
+          }
+          let written = 0;
+          let linesWritten = 0;
+          while (written < contentBytes) {
+            if (context.abortSignal?.aborted) {
+              throw Object.assign(new Error('write aborted by user'), { code: 'EABORT' });
+            }
+            const chunk = contentBuffer.subarray(written, written + WRITE_STREAM_CHUNK);
+            const { bytesWritten: n } = await handle.write(chunk, 0, chunk.length, written);
+            if (n === 0) throw new Error('write made no progress');
+            written += n;
+            // Incremental newline count (the chunk decoded is exact — it was
+            // sliced on a byte boundary of a finished Buffer).
+            linesWritten += (chunk.toString('utf-8').match(/\n/g) || []).length;
+            // Preview = the last chunk written (bounded) so the UI streams the
+            // code as it lands on disk without replaying the whole file.
+            const preview = chunk.toString('utf-8').slice(-1200);
+            emitFileProgress(context, {
+              kind: 'write',
+              path: resolved,
+              percent: Math.min(100, Math.round((written / contentBytes) * 100)),
+              bytesWritten: written,
+              bytesTotal: contentBytes,
+              lines: linesWritten,
+              linesTotal: totalLines,
+              preview,
+            });
+            // Yield to the event loop so progress events flush promptly
+            // instead of batching under a burst of synchronous fs writes.
+            await new Promise((r) => setImmediate(r));
+          }
+        } finally {
+          await handle.close();
+        }
+
+        emitFileProgress(context, {
+          kind: 'write',
+          path: resolved,
+          percent: 100,
+          bytesWritten: contentBytes,
+          bytesTotal: contentBytes,
+          lines: totalLines,
+          linesTotal: totalLines,
+          preview: '',
+        });
         await observeRead(context.sessionId, resolved);
 
         const crypto = await import('crypto');
@@ -438,7 +579,7 @@ export function getWriteFileTool(): ToolDefinition {
         return {
           content: [{
             type: 'text',
-            text: `${verb} file successfully: ${filePath}\nHASH: ${fileHash}\nLines: ${lineCount}\nBytes: ${Buffer.byteLength(content, 'utf-8')}`,
+            text: `${verb} file successfully: ${filePath}\nHASH: ${fileHash}\nLines: ${lineCount}\nBytes: ${Buffer.byteLength(content, 'utf-8')}${observedNote ? '\n\n' + observedNote : ''}`,
           }],
         };
       } catch (err: any) {
@@ -512,10 +653,15 @@ export function getEditFileTool(): ToolDefinition {
         };
       }
 
-      const resolved = path.resolve(context.workspaceDir, filePath);
+      const resolvedResult = await resolveToolPath(context.workspaceDir, filePath, {
+        purpose: 'Use write_file to create it if the file is new.',
+      });
+      if (!resolvedResult.ok) {
+        return { content: [{ type: 'text', text: resolvedResult.error }], isError: true };
+      }
+      const resolved = resolvedResult.resolved;
 
-      const gate = await assertObserved(context.sessionId, resolved, filePath);
-      if (gate) return gate;
+      const observedNote = await observedWarning(context.sessionId, resolved, filePath);
 
       try {
         const content = await fs.readFile(resolved, 'utf-8');
@@ -540,7 +686,7 @@ export function getEditFileTool(): ToolDefinition {
           return {
             content: [{
               type: 'text',
-              text: `Edited file successfully: ${filePath}\nHASH: ${newHash}\nReplacements: ${count}\n\`\`\`diff\n${diffLines}\n\`\`\``,
+              text: `Edited file successfully: ${filePath}\nHASH: ${newHash}\nReplacements: ${count}\n\`\`\`diff\n${diffLines}\n\`\`\`${observedNote ? '\n\n' + observedNote : ''}`,
             }],
           };
         }
@@ -579,12 +725,29 @@ export function getEditFileTool(): ToolDefinition {
         }
 
         if (pendingIdx.length > 1) {
+          // Not a wall — a tripwire. Hard-failing here made models retry into
+          // the same "provide more context" loop. Instead edit the FIRST
+          // occurrence and surface the ambiguity (count + line numbers) in the
+          // output so the model can react. replaceAll still covers every match.
+          const firstLine = content.substring(0, pendingIdx[0]).split('\n').length;
+          const matchLines = pendingIdx.map((at) => content.substring(0, at).split('\n').length).slice(0, 24).join(', ');
+          const updated = content.substring(0, pendingIdx[0]) + normalizedNew + content.substring(pendingIdx[0] + normalizedOld.length);
+          const note = `(note: oldString matched ${pendingIdx.length} places in ${filePath} (lines ${matchLines}${pendingIdx.length > 24 ? ', …' : ''}) — the FIRST match (line ${firstLine}) was edited. Verify the result; if you wanted all, use replaceAll.)`;
+          await fs.writeFile(resolved, updated, 'utf-8');
+          await observeRead(context.sessionId, resolved);
+          const multiCrypto = await import('crypto');
+          const multiNewHash = multiCrypto.createHash('md5').update(updated).digest('hex').slice(0, 12);
+          const oldLines2 = oldString.split('\n');
+          const newLines2 = newString.split('\n');
+          const multiDiff = [
+            ...oldLines2.map((l) => '-' + l),
+            ...newLines2.map((l) => '+' + l),
+          ].join('\n');
           return {
             content: [{
               type: 'text',
-              text: `Error: Found ${pendingIdx.length} unmodified matches for oldString in ${filePath}. Provide more surrounding context to make the match unique, or set replaceAll to true.`,
+              text: `Edited file successfully: ${filePath}\nHASH: ${multiNewHash}\nReplacements: 1 of ${pendingIdx.length}\n\`\`\`diff\n${multiDiff}\n\`\`\`\n\n${note}${observedNote ? '\n\n' + observedNote : ''}`,
             }],
-            isError: true,
           };
         }
 
@@ -605,7 +768,7 @@ export function getEditFileTool(): ToolDefinition {
         return {
           content: [{
             type: 'text',
-            text: `Edited file successfully: ${filePath}\nHASH: ${newHash}\nReplacements: 1\n\`\`\`diff\n${diffLines}\n\`\`\``,
+            text: `Edited file successfully: ${filePath}\nHASH: ${newHash}\nReplacements: 1\n\`\`\`diff\n${diffLines}\n\`\`\`${observedNote ? '\n\n' + observedNote : ''}`,
           }],
         };
       } catch (err: any) {
@@ -630,6 +793,110 @@ function stripLineNumbers(text: string): string {
   return stripLineNumberPrefixes(text);
 }
 
+/**
+ * Line-keyed edit tool. `edits` is a plain object mapping 1-based line numbers
+ * (straight from read_file output) to replacement code, e.g.
+ *   { "23": "const users = [];", "34": "..." }
+ * Multiple disjoint edits happen in ONE call (token-efficient like
+ * replace_lines). Edits apply bottom-to-top so line numbers always refer to the
+ * original file. A line number past the file end creates that line; an empty
+ * string deletes the line. The file must have been read this session first.
+ */
+export function getLineEditTool(): ToolDefinition {
+  return {
+    name: 'line_edit',
+    description:
+      'A REGISTERED FUNCTION TOOL you call directly (NOT a shell command — do NOT try to run ' +
+      '"line_edit" via run_command/terminal; it is not an executable). Apply multiple line-keyed ' +
+      'edits to a file in a single call. Pass args { "path": "...", "edits": { "<1-based line " + ' +
+      'number>": "<exact raw code to place at that line>" } }, e.g. edits { "23": "const users = [];" }. ' +
+      'The edit values must be the PLAIN code text exactly as it should appear on disk (keep your own ' +
+      'indentation). Do NOT wrap them in JSON, do NOT add commas, trailing semicolons, braces, or ' +
+      'other punctuation — pass the bare line content. A line that exists is replaced, a line past the ' +
+      'end is created (blank lines are padded), and an empty string deletes a line. All edits apply ' +
+      'bottom-to-top so line numbers always refer to the ORIGINAL file. Use it for targeted changes ' +
+      'across a file in one shot; use replace_lines for removing a contiguous block. The file must have ' +
+      'been read this session before you can edit it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'File path to edit. Relative paths resolve from the workspace root.',
+        },
+        edits: {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+          description:
+            'Object mapping 1-based line numbers to replacement code. Numeric keys as strings, ' +
+            'e.g. {"23":"const users = [];"}. Each value is the BARE line content exactly as it ' +
+            'should appear on disk — no JSON formatting, no extra braces/commas. Empty string ' +
+            'deletes that line.',
+        },
+      },
+      required: ['path', 'edits'],
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
+    execute: async (
+      input: Record<string, unknown>,
+      context: ToolContext
+    ): Promise<ToolResult> => {
+      const filePath = String(input.path || '');
+      if (!filePath) {
+        return { content: [{ type: 'text', text: 'Error: path is required.' }], isError: true };
+      }
+      const editsObj = input.edits;
+      if (!editsObj || typeof editsObj !== 'object' || Array.isArray(editsObj)) {
+        return { content: [{ type: 'text', text: 'Error: edits must be an object mapping line numbers to code.' }], isError: true };
+      }
+
+      const resolvedResult = await resolveToolPath(context.workspaceDir, filePath, {
+        purpose: 'Use write_file to create it if the file is new.',
+      });
+      if (!resolvedResult.ok) {
+        return { content: [{ type: 'text', text: resolvedResult.error }], isError: true };
+      }
+      const resolved = resolvedResult.resolved;
+
+      const observedNote = await observedWarning(context.sessionId, resolved, filePath);
+
+      try {
+        const original = await fs.readFile(resolved, 'utf-8');
+        const result = applyLineEdits(original, editsObj);
+        if (!result.ok || result.content == null) {
+          return { content: [{ type: 'text', text: `Error: ${result.error}` }], isError: true };
+        }
+
+        await fs.writeFile(resolved, result.content, 'utf-8');
+        await observeRead(context.sessionId, resolved);
+
+        const crypto = await import('crypto');
+        const newHash = crypto.createHash('md5').update(result.content).digest('hex').slice(0, 12);
+        const lines = result.changedLines.join(', ');
+        const diffText = (result.diff || []).join('\n');
+
+        return {
+          content: [{
+            type: 'text',
+            text: `Edited ${filePath} (lines ${lines})\nHASH: ${newHash}\n\`\`\`diff\n${diffText}\n\`\`\`${observedNote ? '\n\n' + observedNote : ''}`,
+          }],
+        };
+      } catch (err: any) {
+        if (err.code === 'ENOENT') {
+          return { content: [{ type: 'text', text: `Error: File not found: ${filePath}. Use write_file to create it.` }], isError: true };
+        }
+        if (err.code === 'EACCES') {
+          return { content: [{ type: 'text', text: `Error: Permission denied: ${filePath}` }], isError: true };
+        }
+        return { content: [{ type: 'text', text: `Error editing ${filePath}: ${err.message}` }], isError: true };
+      }
+    },
+  };
+}
+
 export function getReplaceLinesTool(): ToolDefinition {
   return {
     name: 'replace_lines',
@@ -639,7 +906,8 @@ export function getReplaceLinesTool(): ToolDefinition {
       'NOT need to reproduce the exact old text — just say which lines to remove (' +
       'startLine..endLine, inclusive) and what to put in their place. Everything outside the range ' +
       'is left untouched. Use startLine=endLine to replace a single line; pass an empty replacement ' +
-      'to delete the range. The file must have been read this session before you can replace in it.',
+      'to delete the range. Reading the file first is recommended — an unread replace still applies ' +
+      'but flags a note in the output.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -685,9 +953,15 @@ export function getReplaceLinesTool(): ToolDefinition {
         return { content: [{ type: 'text', text: 'Error: path is required.' }], isError: true };
       }
 
-      const resolved = path.resolve(context.workspaceDir, filePath);
-      const gate = await assertObserved(context.sessionId, resolved, filePath);
-      if (gate) return gate;
+      const resolvedResult = await resolveToolPath(context.workspaceDir, filePath, {
+        purpose: 'Use write_file to create it if the file is new.',
+      });
+      if (!resolvedResult.ok) {
+        return { content: [{ type: 'text', text: resolvedResult.error }], isError: true };
+      }
+      const resolved = resolvedResult.resolved;
+
+      const observedNote = await observedWarning(context.sessionId, resolved, filePath);
 
       try {
         const content = await fs.readFile(resolved, 'utf-8');
@@ -731,7 +1005,7 @@ export function getReplaceLinesTool(): ToolDefinition {
         return {
           content: [{
             type: 'text',
-            text: `Replaced lines ${startLine}-${Math.min(endLine, totalLines)} in ${filePath}\nHASH: ${newHash}\n\`\`\`diff\n${diffLines}\n\`\`\``,
+            text: `Replaced lines ${startLine}-${Math.min(endLine, totalLines)} in ${filePath}\nHASH: ${newHash}\n\`\`\`diff\n${diffLines}\n\`\`\`${observedNote ? '\n\n' + observedNote : ''}`,
           }],
         };
       } catch (err: any) {
@@ -747,11 +1021,133 @@ export function getReplaceLinesTool(): ToolDefinition {
   };
 }
 
+/**
+ * Converts Claude-style "edit block" patches into standard unified diff format.
+ * Some models (e.g. Claude-derived agents) emit prays like:
+ *
+ *   *** Begin Patch
+ *   *** Update File: src/a.scss
+ *   @@
+ *   const ctx = "..."
+ *   -    background: rgba(...)
+ *   +    background: color-mix(...)
+ *   @@
+ *   *** End Patch
+ *
+ * The hunks here use `@@` bounds WITHOUT line-number headers (meaning "match
+ * this context + change anywhere"), which is incompatible with the tool's
+ * unified-diff parser. This converter rewrites each such block into:
+ *
+ *   --- a/path
+ *   +++ b/path
+ *   @@ -0,0 +0,0 @@
+ *   context lines...
+ *   -old
+ *   +new
+ *
+ * using oldStart=0 so the existing fuzzy re-anchor logic locates the hunk by
+ * context, exactly like a self-contained context-only patch. Paths pointing at
+ * /dev/null are treated as create/delete as in the unified format. Returns the
+ * input unchanged when it is not an edit-block patch.
+ */
+export function normalizeEditBlockPatch(raw: string): string {
+  // Convert Claude-style edit blocks (`*** Begin Patch` / `*** Update File:` /
+  // `*** Create File:` / `*** Delete File:` with `@@` hunk separators) into
+  // standard unified diff. Handle the wrapper when present AND bare `*** ...`
+  // file blocks (some models omit the Begin/End wrapper).
+  if (!/\*\*\* Begin Patch/.test(raw) && !/^\s*\*\*\* (?:Update|Create|Delete) File:/m.test(raw)) {
+    return raw;
+  }
+
+  const lines = raw.split('\n');
+  const sections: Array<{ path: string; action: 'update' | 'create' | 'delete'; hunks: string[][] }> = [];
+  let current: { path: string; action: 'update' | 'create' | 'delete'; hunks: string[][] } | null = null;
+  let currentHunk: string[] | null = null;
+
+  // Close the in-progress hunk (if any) and register it on the current file.
+  const flushHunk = (): void => {
+    if (currentHunk) {
+      if (current && currentHunk.length > 0) current.hunks.push(currentHunk);
+      currentHunk = null;
+    }
+  };
+
+  const startSection = (path: string, action: 'update' | 'create' | 'delete'): void => {
+    flushHunk();
+    current = { path: path.trim(), action, hunks: [] };
+    sections.push(current);
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^\*\*\* (Begin|End) Patch/.test(trimmed)) {
+      flushHunk();
+      continue;
+    }
+    const updateMatch = trimmed.match(/^\*\*\* (Update|Create|Delete) File:\s+(.+)$/i);
+    if (updateMatch) {
+      startSection(updateMatch[2], (updateMatch[1].toLowerCase() as 'update' | 'create' | 'delete'));
+      continue;
+    }
+    if (trimmed === '@@' || /^@@$/.test(trimmed)) {
+      // `@@` opens AND closes a hunk: close any in-progress one, then mark that
+      // a new hunk begins. Content accumulates until the next `@@`.
+      flushHunk();
+      currentHunk = [];
+      continue;
+    }
+    if (currentHunk) currentHunk.push(line);
+  }
+  flushHunk();
+
+  if (sections.length === 0) return raw;
+
+  const out: string[] = [];
+  for (const sec of sections) {
+    if (!sec.path) {
+      // Orphan hunk without a file header — keep it downstream WITHOUT dropping
+      // it; join the hunks so they still get a chance (path resolution later).
+      for (const h of sec.hunks) out.push(h.join('\n'));
+      continue;
+    }
+    if (sec.action === 'delete') {
+      out.push(`--- a/${sec.path}`);
+      out.push('+++ /dev/null');
+      for (const hunk of sec.hunks) {
+        out.push('@@ -0,0 +0,0 @@');
+        const body = hunk.join('\n').trimEnd();
+        if (body) out.push(body);
+      }
+      continue;
+    }
+    if (sec.action === 'create') {
+      out.push('--- /dev/null');
+      out.push(`+++ b/${sec.path}`);
+      for (const hunk of sec.hunks) {
+        out.push('@@ -0,0 +0,0 @@');
+        const body = hunk.join('\n').trimEnd();
+        if (body) out.push(body);
+      }
+      continue;
+    }
+    // update
+    out.push(`--- a/${sec.path}`);
+    out.push(`+++ b/${sec.path}`);
+    for (const hunk of sec.hunks) {
+      out.push('@@ -0,0 +0,0 @@');
+      const body = hunk.join('\n').trimEnd();
+      if (body) out.push(body);
+    }
+  }
+  return out.join('\n');
+}
+
 export function getApplyPatchTool(): ToolDefinition {
   return {
     name: 'apply_patch',
     description:
       'Apply a unified diff patch to modify one or more files. Supports add (+), delete (-), and modify operations. ' +
+      'Also accepts Claude-style edit-block patches (*** Update File: ... / @@ ... @@). ' +
       'Use this for multi-file changes. The patch format uses standard unified diff syntax.',
     inputSchema: {
       type: 'object',
@@ -783,6 +1179,11 @@ export function getApplyPatchTool(): ToolDefinition {
       }
 
       patchText = patchText.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\r\n/g, '\n');
+
+      // Some models emit Claude-style edit blocks (`*** Update File:` / `@@`).
+      // Normalize them into standard unified diff before parsing so the rest of
+      // this tool (hunk anchoring/verification) works unchanged for both forms.
+      patchText = normalizeEditBlockPatch(patchText);
 
       // Parse file sections. Models send both classic `--- a/x\n+++ b/x` and
       // git-style patches with a leading `diff --git` line; accept every shape
@@ -828,6 +1229,7 @@ export function getApplyPatchTool(): ToolDefinition {
 
       const applied: string[] = [];
       const results: string[] = [];
+      const observedNotes: string[] = [];
 
       for (const chunk of fileChunks) {
         const targetPath = chunk.targetPath;
@@ -835,7 +1237,15 @@ export function getApplyPatchTool(): ToolDefinition {
 
         if (!targetPath || targetPath === '/dev/null') continue;
 
-        const resolved = path.resolve(context.workspaceDir, targetPath);
+        // Resolve the patch target through the same bounded resolver the other
+        // file tools use (patch targets may be mis-anchored too). Patches can
+        // also CREATE brand-new files, so forCreate=true: a not-yet-existing
+        // target falls back to its exact path instead of a filename scan.
+        const resolvedResult = await resolveToolPath(context.workspaceDir, targetPath, {
+          forCreate: true,
+          purpose: 'Creating it here, or correcting the path to the real file.',
+        });
+        const resolved = resolvedResult.ok ? resolvedResult.resolved : path.resolve(context.workspaceDir, targetPath);
 
         // Observation policy: patching/deleting requires the session to have
         // read the target (unless the file is brand-new for an addition).
@@ -846,8 +1256,8 @@ export function getApplyPatchTool(): ToolDefinition {
           fileExists = false;
         }
         if (fileExists) {
-          const gate = await assertObserved(context.sessionId, resolved, targetPath);
-          if (gate) return gate;
+          const warn = await observedWarning(context.sessionId, resolved, targetPath);
+          if (warn) observedNotes.push(warn);
         }
 
         try {
@@ -1026,6 +1436,15 @@ export function getApplyPatchTool(): ToolDefinition {
           }
 
           await fs.mkdir(path.dirname(resolved), { recursive: true });
+          const patchedLines = updatedContent.split('\n').length;
+          emitFileProgress(context, {
+            kind: 'apply',
+            path: resolved,
+            percent: Math.min(100, Math.round(((fileChunks.indexOf(chunk) + 1) / fileChunks.length) * 100)),
+            lines: patchedLines,
+            linesTotal: patchedLines,
+            detail: `Applying ${changesApplied} change(s) to ${targetPath}`,
+          });
           await fs.writeFile(resolved, updatedContent, 'utf-8');
           await observeRead(context.sessionId, resolved);
           const crypto = await import('crypto');
@@ -1060,7 +1479,7 @@ export function getApplyPatchTool(): ToolDefinition {
       return {
         content: [{
           type: 'text',
-          text: `Patch applied successfully:\n${results.join('\n')}`,
+          text: `Patch applied successfully:\n${results.join('\n')}${observedNotes.length ? '\n\n' + observedNotes.join('\n') : ''}`,
         }],
       };
     },
@@ -1094,12 +1513,23 @@ export function getDeleteFileTool(): ToolDefinition {
         return { content: [{ type: 'text', text: 'Error: path is required.' }], isError: true };
       }
 
-      const resolved = path.resolve(context.workspaceDir, filePath);
+      const resolvedResult = await resolveToolPath(context.workspaceDir, filePath, {
+        purpose: 'Deletion needs the exact path — check it before retrying.',
+      });
+      if (!resolvedResult.ok) {
+        return { content: [{ type: 'text', text: resolvedResult.error }], isError: true };
+      }
+      const resolved = resolvedResult.resolved;
 
       try {
         const stat = await fs.stat(resolved);
-        const gate = await assertObserved(context.sessionId, resolved, filePath);
-        if (gate) return gate;
+        const deleteNote = await observedWarning(context.sessionId, resolved, filePath);
+        emitFileProgress(context, {
+          kind: 'delete',
+          path: resolved,
+          percent: 50,
+          detail: `Deleting ${filePath}`,
+        });
         if (stat.isDirectory()) {
           const entries = await fs.readdir(resolved);
           if (entries.length > 0) {
@@ -1113,7 +1543,7 @@ export function getDeleteFileTool(): ToolDefinition {
           await fs.unlink(resolved);
         }
         observedFiles.delete(observeKey(context.sessionId, resolved));
-        return { content: [{ type: 'text', text: `Deleted: ${filePath}` }] };
+        return { content: [{ type: 'text', text: `Deleted: ${filePath}${deleteNote ? '\n\n' + deleteNote : ''}` }] };
       } catch (err: any) {
         if (err.code === 'ENOENT') {
           return { content: [{ type: 'text', text: `Error: File not found: ${filePath}` }], isError: true };
@@ -1162,7 +1592,14 @@ export function getListDirectoryTool(): ToolDefinition {
       const dirPath = String(input.path || '.');
       const offset = Math.max(1, Number(input.offset) || 1);
       const limit = Math.min(2000, Math.max(1, Number(input.limit) || 2000));
-      const resolved = path.resolve(context.workspaceDir, dirPath);
+
+      const resolvedResult = await resolveToolPath(context.workspaceDir, dirPath, {
+        purpose: 'Re-check the directory path.',
+      });
+      if (!resolvedResult.ok) {
+        return { content: [{ type: 'text', text: resolvedResult.error }], isError: true };
+      }
+      const resolved = resolvedResult.resolved;
 
       try {
         const entries = await fs.readdir(resolved, { withFileTypes: true });
@@ -1198,6 +1635,121 @@ export function getListDirectoryTool(): ToolDefinition {
         }
         return { content: [{ type: 'text', text: `Error listing ${dirPath}: ${err.message}` }], isError: true };
       }
+    },
+  };
+}
+
+const MAX_INSPECT_PATHS = 12;
+const INSPECT_LIST_LIMIT = 30;
+const INSPECT_READ_LINES = 50;
+
+/**
+ * `inspect` — read MANY files / list MANY directories in ONE tool call.
+ *
+ * The whole point is parallelism as a first-class primitive: instead of
+ * forcing the model to emit N read_file/list_directory calls across N turns,
+ * it lists/reads a batch of paths all at once (executed concurrently
+ * server-side) and gets every result back in a single response. This removes
+ * the per-turn round-trip latency AND — critically for small/local models that
+ * stall on long multi-turn tool histories — collapses N+1 LLM turns into one.
+ */
+export function getInspectTool(): ToolDefinition {
+  return {
+    name: 'inspect',
+    description:
+      'Read multiple files and list multiple directories in ONE call, executed in parallel. ' +
+      'Pass up to 12 absolute-or-workspace-relative paths. Directories are listed (first 30 entries each), ' +
+      'files are read (first 50 lines each) with a per-file header. ' +
+      'BEST TOOL for exploration: when you need to see a directory tree AND the contents of its key files, ' +
+      'pass all the paths together instead of doing one read_file/list_directory per turn — this is dramatically faster. ' +
+      'Use read_file for deep/line-targeted reads, grep/glob for searching, and this tool for bulk orientation.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        paths: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Paths to inspect. Each may be a directory (listed) or a file (read, first 50 lines). Max 12.',
+          maxItems: MAX_INSPECT_PATHS,
+          minItems: 1,
+        },
+      },
+      required: ['paths'],
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+    },
+    execute: async (
+      input: Record<string, unknown>,
+      context: ToolContext
+    ): Promise<ToolResult> => {
+      const rawPaths = Array.isArray(input.paths) ? input.paths.map((p) => String(p).trim()).filter(Boolean) : [];
+      if (rawPaths.length === 0) {
+        return { content: [{ type: 'text', text: 'Error: paths must be a non-empty array of strings.' }], isError: true };
+      }
+      if (rawPaths.length > MAX_INSPECT_PATHS) {
+        return {
+          content: [{ type: 'text', text: `Error: inspect accepts at most ${MAX_INSPECT_PATHS} paths at once (got ${rawPaths.length}). Split into batches.` }],
+          isError: true,
+        };
+      }
+
+      const results = await Promise.all(rawPaths.map(async (relPath) => {
+        const pathResult = await resolveToolPath(context.workspaceDir, relPath, {
+          purpose: 'Re-check the path or use glob to find the real file.',
+        });
+        if (!pathResult.ok) {
+          return `== MISSING: ${relPath} ==\n${pathResult.error}`;
+        }
+        const resolved = pathResult.resolved;
+        try {
+          const stat = await fs.stat(resolved);
+          if (stat.isDirectory()) {
+            const entries = await fs.readdir(resolved, { withFileTypes: true });
+            const sorted = entries.sort((a, b) => {
+              if (a.isDirectory() && !b.isDirectory()) return -1;
+              if (!a.isDirectory() && b.isDirectory()) return 1;
+              return a.name.localeCompare(b.name);
+            });
+            const page = sorted.slice(0, INSPECT_LIST_LIMIT);
+            const lines = page.map((e) => `${e.isDirectory() ? e.name + '/' : e.name}`);
+            const truncated = sorted.length > page.length;
+            const body = lines.length === 0
+              ? '(empty directory)'
+              : lines.join('\n') + (truncated ? `\n[... ${sorted.length - page.length} more entries — use list_directory to page]` : '');
+            return `== DIR: ${relPath} ==\n${body}`;
+          }
+
+          const ext = path.extname(resolved).toLowerCase();
+          if (BINARY_EXTENSIONS.has(ext) || isImageFile(resolved)) {
+            return `== FILE: ${relPath} ==\n[binary/image — use read_file to view]`;
+          }
+
+          const cached = await fileReadCache.read(resolved);
+          let content: string;
+          if (cached) {
+            content = cached.content;
+          } else {
+            const buf = await fs.readFile(resolved);
+            if (isBinaryFile(buf)) {
+              return `== FILE: ${relPath} ==\n[binary file — use read_file to view]`;
+            }
+            content = buf.toString('utf-8');
+          }
+          await observeRead(context.sessionId, resolved);
+          const lines = content.split('\n');
+          const page = lines.slice(0, INSPECT_READ_LINES);
+          const truncated = lines.length > page.length;
+          const body = page.join('\n') + (truncated ? `\n[... ${lines.length - page.length} more lines — use read_file startLine/endLine to continue]` : '');
+          return `== FILE: ${relPath} ==\n${body}`;
+        } catch (err: any) {
+          if (err.code === 'ENOENT') return `== MISSING: ${relPath} ==\n(not found)`;
+          return `== ERROR: ${relPath} ==\n${err.message || String(err)}`;
+        }
+      }));
+
+      return { content: [{ type: 'text', text: results.join('\n\n') }] };
     },
   };
 }

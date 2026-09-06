@@ -4,15 +4,20 @@ import { useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { LogOut } from 'lucide-react';
 import { useAuth } from './AuthProvider';
-import { Sidebar, TopBarSearch } from './Sidebar';
+import { Sidebar } from './Sidebar';
 import { MobileNav } from './MobileNav';
 import { MobileBottomNav } from './MobileNavigation';
+import { OnboardingWizard } from './onboarding/OnboardingWizard';
+import { initExternalLinkHandling } from '../lib/external-links';
 
 export const TITLES: Record<string, string> = {
-  '/': 'Dashboard',
+  '/': 'Agent',
+  '/dashboard': 'Dashboard',
   '/chat': 'Chat',
+  '/agent': 'Agent',
   '/documents': 'Knowledge Base',
   '/models': 'Models',
+  '/mcp': 'MCP Servers',
   '/playground': 'Playground',
   '/analytics': 'Analytics',
   '/settings': 'Settings',
@@ -23,10 +28,10 @@ export const TITLES: Record<string, string> = {
 const AUTH_PAGES = ['/login', '/register'];
 
 /** Pages that render their own chrome (sidebar + header) and skip the shell's. */
-const SELF_LAYOUT_PAGES = ['/chat', '/agent'];
+const SELF_LAYOUT_PAGES = ['/', '/chat', '/agent'];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { user, loading, logout } = useAuth();
+  const { user, loading, logout, needsOnboarding, dismissOnboarding } = useAuth();
   const rawPathname = usePathname();
   // Static exports serve "/agent.html" — normalize so self-layout pages match.
   const pathname = rawPathname?.replace(/\.html$/, '') ?? '/';
@@ -37,6 +42,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   // Route guard: signed-out users are sent to /login, signed-in users away
   // from the auth pages.
+  useEffect(() => {
+    // Open external links in the OS browser instead of navigating the webview
+    // away (which would trap the user with no way back).
+    initExternalLinkHandling();
+  }, []);
+
   useEffect(() => {
     if (loading) return;
     if (!user && !isAuthPage) {
@@ -73,24 +84,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {!isSelfLayout && (
           <>
             {/* Desktop top bar */}
-            <header className="hidden h-16 shrink-0 items-center justify-between gap-4 border-b border-surface-800/80 bg-bg-elevated/60 px-6 backdrop-blur lg:flex">
-              <div className="flex min-w-0 items-center gap-3">
-                <h1 className="truncate text-[15px] font-semibold text-white">{title}</h1>
+            <header className="hidden h-14 shrink-0 items-center justify-between gap-4 border-b border-surface-800/80 bg-bg-elevated/60 px-5 backdrop-blur lg:flex">
+              <div className="flex min-w-0 items-center gap-3 self-center">
+                <h1 className="truncate text-[15px] font-semibold text-slate-100">{title}</h1>
                 {pathname !== '/' && pathname !== '/chat' && (
-                  <span className="hidden items-center gap-1.5 text-xs text-ink-muted md:flex">
-                    Smoke Monkey
+                  <span className="hidden items-center gap-1.5 text-xs text-slate-400 md:flex">
+                    <span className="text-slate-600">›</span>
+                    <span>Smoke Monkey</span>
                   </span>
                 )}
               </div>
               <div className="flex items-center gap-3">
-                <TopBarSearch />
                 {user ? (
                   <>
-                    <div className="flex items-center gap-2.5">
-                      <span className="hidden text-sm text-ink-secondary md:block">{user.email}</span>
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/15 text-xs font-semibold text-primary">
+                    <div className="flex items-center gap-2.5 rounded-full border border-white/10 bg-white/5 py-0.5 pl-0.5 pr-3.5 backdrop-blur-md">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/15 text-xs font-semibold text-primary ring-1 ring-inset ring-primary/20">
                         {(user.name || user.email || 'A').slice(0, 1).toUpperCase()}
                       </div>
+                      <span className="hidden text-sm text-slate-100 md:block">{user.email}</span>
                     </div>
                     <button
                       type="button"
@@ -98,7 +109,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         logout();
                         router.push('/login');
                       }}
-                      className="flex h-9 w-9 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-surface-800 hover:text-red-300"
+                      className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-surface-800 hover:text-red-300"
                       aria-label="Sign out"
                       title="Sign out"
                     >
@@ -119,6 +130,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden">{children}</main>
         {!isSelfLayout && <MobileBottomNav />}
       </div>
+      <OnboardingWizard open={!!user && needsOnboarding && !isAuthPage} onClose={dismissOnboarding} />
     </div>
   );
 }

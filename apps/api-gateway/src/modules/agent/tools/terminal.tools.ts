@@ -12,7 +12,7 @@ import { ConnectorRegistry } from '../../ssh/connector.registry';
 
 const execAsync = promisify(exec);
 
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 180_000;
 const MAX_TIMEOUT_MS = 600_000;
 const MAX_CAPTURE_BYTES = 1024 * 1024;
 
@@ -128,11 +128,18 @@ async function runForeground(
   env: Record<string, string | undefined>,
   timeoutMs: number,
   onStream?: (header: string, stdout: string, stderr: string) => void,
+  abortSignal?: AbortSignal,
 ): Promise<ShellOutcome & { captureTruncated: boolean; spawnError?: string }> {
   const { spawn } = await import('child_process');
+  // detached:true makes the shell the leader of its OWN process group (pid ==
+  // pgroup). Commands like recursive "pnpm run build" spawn their own children
+  // (pnpm → node → pnpm → ...); signaling only the direct shell leaves those
+  // grandchildren alive and re-spawning. Detaching lets hardKill kill the WHOLE
+  // process group (-pid) so a runaway/recursive command is actually torn down.
   const child = spawn('/bin/sh', ['-c', command], {
     cwd,
     env,
+    detached: true,
     // stdin is a PIPE we auto-feed: interactive confirmations (e.g. shadcn's
     // "File already exists. Overwrite? (y/N)" or npx's "Ok to proceed?") are
     // answered with "yes" on an interval so the command proceeds deterministically
@@ -142,19 +149,35 @@ async function runForeground(
   });
 
   // Auto-answer stdin prompts until the child exits or its stdin closes.
-  const stdinFeeder = setInterval(() => {
+  // NOTE: the async 'error' event on the piped socket is what actually fires
+  // on EPIPE (stream.write() only throws synchronously for sync errors). Without
+  // a registered 'error' listener, Node emits an UNHANDLED 'error' event that
+  // crashes the ENTIRE process — which manifested as the agent "sticking" (the
+  // run coroutine dies) and the Stop button going dead (no server to receive it).
+  let stdinFeeder: NodeJS.Timeout | undefined;
+  const stopStdinFeeder = () => {
+    if (stdinFeeder) {
+      clearInterval(stdinFeeder);
+      stdinFeeder = undefined;
+    }
+  };
+  // Attach the error listener FIRST so no write can ever surface an unhandled
+  // 'error' event on the stdin socket (child exiting, shell closing the pipe,
+  // detached grandchild closing stdin, etc.).
+  child.stdin?.on('error', stopStdinFeeder);
+  stdinFeeder = setInterval(() => {
+    if (child.stdin.destroyed || !child.stdin.writable) {
+      stopStdinFeeder();
+      return;
+    }
     try {
-      if (child.stdin.destroyed || !child.stdin.writable) {
-        clearInterval(stdinFeeder);
-        return;
-      }
       child.stdin.write('y\n');
     } catch {
-      clearInterval(stdinFeeder);
+      stopStdinFeeder();
     }
   }, 150);
-  child.once('exit', () => clearInterval(stdinFeeder));
-  child.once('error', () => clearInterval(stdinFeeder));
+  child.once('exit', stopStdinFeeder);
+  child.once('error', stopStdinFeeder);
 
   return new Promise((resolve) => {
     let stdoutBuf = Buffer.alloc(0);
@@ -203,18 +226,56 @@ async function runForeground(
 
     let timedOut = false;
     let settled = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
+
+    // Kill the child AND its whole process group (soft SIGTERM, then SIGKILL
+    // after a grace period) so a hung or recursive command never leaks. Because
+    // the shell was spawned detached, `process.kill(-child.pid, signal)` tears
+    // down every descendant (nested "pnpm run build" loops, node children, etc.)
+    // — signaling only the shell would leave them running and re-spawning.
+    const hardKill = (signal: NodeJS.Signals) => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      // Signal the process group first (negative pid). This is a no-op target if
+      // pgroupId isn't the child's own group, but with detached:true it is.
+      try { process.kill(-child.pid!, signal); } catch {}
+      try { child.kill(signal); } catch {}
       setTimeout(() => {
+        try { process.kill(-child.pid!, 'SIGKILL'); } catch {}
         try { child.kill('SIGKILL'); } catch {}
       }, 5_000).unref();
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      hardKill('SIGTERM');
     }, timeoutMs);
+
+    // Honor the run's abort signal: when the user hits Stop (or the per-tool
+    // timeout fires), the in-flight foreground command is killed immediately
+    // instead of running to completion — this is what actually lets a runaway
+    // build be torn down rather than looping/hanging.
+    let abortListener: (() => void) | undefined;
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        timedOut = true;
+        hardKill('SIGTERM');
+      } else {
+        abortListener = () => {
+          timedOut = true;
+          hardKill('SIGTERM');
+        };
+        abortSignal.addEventListener('abort', abortListener, { once: true });
+      }
+    }
+
+    const cleanupAbort = () => {
+      if (abortListener && abortSignal) abortSignal.removeEventListener('abort', abortListener);
+    };
 
     child.on('error', (err) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      cleanupAbort();
       resolve({
         stdout: '',
         stderr: '',
@@ -231,6 +292,7 @@ async function runForeground(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      cleanupAbort();
       // Final flush so any trailing buffered output reaches the UI.
       if (onStream && (stdoutBuf.length || stderrBuf.length)) {
         onStream(
@@ -353,6 +415,87 @@ function isInteractiveCommand(command: string): boolean {
   return interactivePatterns.some(p => p.test(command.trim()));
 }
 
+/**
+ * Detect commands that will hang the foreground shell. Two common anti-patterns:
+ *
+ *  1. "server_cmd & sleep 2 && tail -30" — the `&` backgrounds server_cmd but the
+ *     spawned shell keeps its pipe fds open, so the shell never exits even though
+ *     the foreground work (sleep+tail) is done. The timeout fires but the shell
+ *     is still alive, and the next command never runs.
+ *
+ *  2. "nodemon src/index.js" (no &, no background=true) — a long-running server
+ *     that never exits, so the shell blocks forever.
+ *
+ * Returns { risk, restructured, warning } where:
+ *  - risk: true if the command matches a hang pattern
+ *  - restructured: the fixed command to run instead (or original if no fix needed)
+ *  - warning: message to surface to the agent so it learns
+ */
+function detectHangRisk(command: string): { risk: boolean; restructured?: string; warning?: string } {
+  const trimmed = command.trim();
+
+  // ── Pattern 1: backgrounded process + foreground work ──────────────────
+  // "server & cmd1 && cmd2" or "server & cmd1 ; cmd2"
+  // The `&` puts server in the background but the shell stays alive.
+  // Fix: split into two separate calls — background the server via nohup,
+  //       run the foreground work in a clean shell.
+  const bgWithFollowUp = /^(.+?)\s+&\s+(.+)$/;
+  const bgMatch = trimmed.match(bgWithFollowUp);
+  if (bgMatch) {
+    const bgPart = bgMatch[1].trim();
+    const fgPart = bgMatch[2].trim();
+    // Only restructure if the background part looks like a long-running process
+    const longRunning = /\b(nodemon|pm2|forever|webpack-dev-server|vite\s|next\sdev|react-scripts\sstart|vue-cli-service\sserve|nodemon|concurrently|live-server|browser-sync|chokidar|watchman|jest\s--watch|vitest\s--watch|pnpm\sdev|npm\sdev|yarn\sdev|node\s.*\.js|node\s.*\.ts|python\s.*\.py|ruby\s.*\.rb|java\s|go\srun|cargo\srun|make\swatch|tail\s-f)\b/i;
+    if (longRunning.test(bgPart)) {
+      return {
+        risk: true,
+        restructured: fgPart,
+        warning: `⚠️ HANG PREVENTION: The backgrounded process (${bgPart.split(/\s+/).slice(0, 3).join(' ')}...) was auto-detached. ` +
+          `Foreground work: "${fgPart}". ` +
+          `To start a server, use background=true on a SEPARATE call — do NOT combine & with other commands in one call.`,
+      };
+    }
+  }
+
+  // ── Pattern 2: command ending with & (foreground shell hangs) ──────────
+  // "node server.js &" or "cd backend && node src/server.js > /tmp/log 2>&1 &"
+  // The `&` backgrounds the child but the shell keeps its pipe fds open,
+  // so the foreground shell never exits — the timeout fires but can't kill
+  // it cleanly, and the next command never runs.
+  const endsWithAmpersand = /\s&\s*$/.test(trimmed);
+  if (endsWithAmpersand) {
+    const longRunning = /\b(nodemon|pm2|forever|webpack-dev-server|vite\s|next\sdev|react-scripts\sstart|vue-cli-service\sserve|nodemon|concurrently|live-server|browser-sync|chokidar|watchman|jest\s--watch|vitest\s--watch|pnpm\sdev|npm\sdev|yarn\sdev|node\s.*\.js|node\s.*\.ts|python\s.*\.py|ruby\s.*\.rb|java\s|go\srun|cargo\srun|make\swatch|tail\s-f)\b/i;
+    if (longRunning.test(trimmed.replace(/\s*&\s*$/, ''))) {
+      return {
+        risk: true,
+        restructured: trimmed.replace(/\s*&\s*$/, ''),
+        warning: `⚠️ HANG PREVENTION: The backgrounded process was auto-detached. ` +
+          `Foreground work will run in a clean shell. ` +
+          `To start a server, use background=true on a SEPARATE call — do NOT combine & with other commands in one call.`,
+      };
+    }
+    // Generic case: any command ending with & in foreground hangs the shell
+    return {
+      risk: true,
+      warning: `⚠️ HANG PREVENTION: A command ending with "&" in foreground mode hangs the shell forever (the backgrounded child keeps the pipe open). ` +
+        `Remove the "&" and set background=true for a SEPARATE call, or just remove the "&" if you want to wait for completion.`,
+    };
+  }
+
+  // ── Pattern 3: long-running server without background ──────────────────
+  // "nodemon src/index.js" or "pnpm dev" without &
+  const longRunningServer = /\b(nodemon|pm2|forever|webpack-dev-server|vite\s(?:dev|serve)|next\sdev|react-scripts\sstart|vue-cli-service\sserve|live-server|browser-sync|jest\s--watch|vitest\s--watch)\b/i;
+  if (longRunningServer.test(trimmed) && !trimmed.includes('&&') && !trimmed.includes('; ')) {
+    return {
+      risk: true,
+      warning: `⚠️ HANG PREVENTION: "${trimmed.split(/\s+/).slice(0, 3).join(' ')}..." looks like a long-running server. ` +
+        `Set background=true to run it detached — running it in the foreground will block the terminal forever.`,
+    };
+  }
+
+  return { risk: false };
+}
+
 function detectWarnings(command: string, workdir: string): string[] {
   const warnings: string[] = [];
   for (const pattern of DANGEROUS_PATTERNS) {
@@ -427,13 +570,14 @@ export function getRunCommandTool(connectors?: ConnectorRegistry): ToolDefinitio
     name: 'run_command',
     description:
       'Execute a shell command in the workspace. THIS is your primary engineering tool — use it for discovery, search, scripts, tests, builds, git, logs, processes, and HTTP/API checks. ' +
-      'Prefer ONE combined command for related operations instead of many tiny calls: chain related read-only steps with && (or ; for independent checks) in a single execution, e.g. "pwd && git status --short && git diff --stat" or "rg -n \"Auth|login\" src && pnpm exec tsc --noEmit". Use rg/fd for search, git for repository state, jq for JSON, package-manager commands for validation, and curl/log/process commands for runtime verification. ' +
+      'Prefer ONE combined command for related operations instead of many tiny calls: chain related read-only steps with && (or ; for independent checks) in a single execution, e.g. "pwd && git status --short && git diff --stat" or "rg -n \"Auth|login\" src && pnpm exec tsc --noEmit". Use rg/fd for search (if rg is not installed, fall back to grep -rnE), git for repository state, jq for JSON, package-manager commands for validation, and curl/log/process commands for runtime verification. If `pnpm i`/`npm i`/`yarn` fails with `ERR_PNPM_JSON_PARSE`/`EJSONPARSE`/`Unexpected non-whitespace character after JSON`/`Unexpected token` naming a package.json at position N, that file is corrupt JSON — read it, fix the syntax (usually one missing brace/quote or a broken "scripts" block), confirm with `jq empty <file>`, then re-run the install. ' +
       'Each call runs in a fresh shell: no state (cwd, variables) persists between calls — pass workdir instead of using cd. ' +
       'Non-zero exits are reported as an [exit code: N] marker (data, not a tool failure): always check it and diagnose the root cause before retrying — never blindly repeat a failed command. ' +
       'Long output keeps the tail; the full output is saved to a file whose path is reported when truncated. ' +
       'Commands must be non-interactive and must not wait on stdin: use the tool\'s own flag for init/add/install CLIs (-y, --yes, --force, --no-input or env CI=true, e.g. "CI=true npx --yes shadcn@latest add button -y"). ' +
-      'For long-running processes (servers, watchers) you MUST set background=true so the command runs detached and does not block; output streams LIVE to the UI. After starting one, run "sleep 2 && tail -30 <log>" to verify it actually started. ' +
-      'Set an explicit timeout for potentially long commands (e.g. timeout=300000 for builds/tests) so a hung command is killed by SIGTERM instead of blocking forever; every command is auto-killed at its timeout. ' +
+      'For long-running processes (servers, watchers) you MUST set background=true so the command runs detached and does not block; output streams LIVE to the UI. After starting one, run "sleep 2 && tail -30 <log>" to verify it actually started — if the process prints a banner but no listen message, read the entry file (from package.json "scripts"/"main") and confirm it actually calls listen() or createServer(); an app that only exports the app object never starts the server. ' +
+      'Every command is auto-killed after 3 minutes by default. Set an explicit timeout for long-running commands (e.g. timeout=300000 for builds/tests, timeout=600000 for very long installs) — NOT setting one means the command is hard-capped at 180s and will be killed. ' +
+      'NEVER combine a backgrounded server with foreground work using `&` in one call (e.g. "nodemon ... & sleep 2 && tail -30") — this hangs the terminal forever because the shell keeps its pipe fds open. Instead: use background=true on a SEPARATE call for the server, then a follow-up call for verification. Long-running servers (nodemon, pm2, vite dev, next dev, pnpm dev) submitted without background=true will be rejected. ' +
       'NEVER kill the api-gateway or critical infrastructure: killing the server that is running you (e.g. a bare "kill -9 <pid>" that targets the api-gateway, or pkill/killall on node/postgres/redis) severs the run and is blocked. To stop a process you started, first find it via lsof -nP -iTCP:<port> or ps, then kill only that specific child PID with a graceful SIGTERM first. ' +
       'Do not use this tool for destructive operations (git reset --hard, git clean -fd, rm -rf, destructive SQL) unless the user explicitly authorized them.',
     inputSchema: {
@@ -449,7 +593,7 @@ export function getRunCommandTool(connectors?: ConnectorRegistry): ToolDefinitio
         },
         timeout: {
           type: 'number',
-          description: 'Timeout in milliseconds. Default: 120000 (2 min). Max: 600000 (10 min). Only applies to foreground commands.',
+          description: 'Timeout in milliseconds. Default: 180000 (3 min). Max: 600000 (10 min). Only applies to foreground commands. Set this explicitly for long-running commands (builds, installs, tests).',
           minimum: 1000,
           maximum: MAX_TIMEOUT_MS,
         },
@@ -472,7 +616,7 @@ export function getRunCommandTool(connectors?: ConnectorRegistry): ToolDefinitio
       input: Record<string, unknown>,
       context: ToolContext
     ): Promise<ToolResult> => {
-      const command = String(input.command || '');
+      let command = String(input.command || '');
       const background = input.background === true;
       const timeout = Math.min(MAX_TIMEOUT_MS, Math.max(1000, Number(input.timeout) || DEFAULT_TIMEOUT_MS));
 
@@ -496,6 +640,26 @@ export function getRunCommandTool(connectors?: ConnectorRegistry): ToolDefinitio
       }
       if (killGuard) warnings.push(killGuard);
 
+      // Hang prevention: detect commands that will block the terminal forever
+      // and auto-restructure them or warn the agent.
+      const hangCheck = detectHangRisk(command);
+      if (hangCheck.risk) {
+        if (hangCheck.restructured) {
+          // Command was restructured — run the fixed version, surface the warning
+          warnings.push(hangCheck.warning!);
+          command = hangCheck.restructured;
+        } else if (!background) {
+          // Server detected without background=true — block and tell agent to fix
+          return {
+            content: [{
+              type: 'text',
+              text: hangCheck.warning! + ' Resubmit with background=true.',
+            }],
+            isError: true,
+          };
+        }
+      }
+
       if (background) {
         const { spawn } = await import('child_process');
         // Keep logs OUT of the workspace: they would pollute search/glob results.
@@ -506,7 +670,18 @@ export function getRunCommandTool(connectors?: ConnectorRegistry): ToolDefinitio
         const mergedEnv = buildEnv(input.env as Record<string, string> | undefined);
 
         try {
-          const child = spawn('sh', ['-c', `nohup ${command} > "${bgLog}" 2>&1 &\necho $!`], {
+          // Run the user's command via a SCRIPT FILE instead of interpolating it
+          // straight into `nohup ${command} ...`. `nohup` can only exec an external
+          // command, so a command that starts with a shell builtin like
+          // `cd Project && node backend/src/app.js` runs the `cd` in a FORKED child
+          // — the cwd change never reaches the rest of the pipeline, and the server
+          // starts from the wrong directory (MODULE_NOT_FOUND / wrong relative
+          // paths). Wrapping `/bin/sh <script>` keeps the whole command (incl. cds
+          // and compound && || ; chains) in ONE shell so it runs exactly like the
+          // foreground path. `detached: true` still protects it from SIGHUP.
+          const scriptPath = path.join(bgDir, `bg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.sh`);
+          fs.writeFileSync(scriptPath, `${command}\n`, { mode: 0o600 });
+          const child = spawn('sh', ['-c', `nohup /bin/sh "${scriptPath}" > "${bgLog}" 2>&1 &\necho $!`], {
             cwd: workdir,
             detached: true,
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -515,6 +690,11 @@ export function getRunCommandTool(connectors?: ConnectorRegistry): ToolDefinitio
 
           const stdout = await new Promise<string>((resolve) => {
             let data = '';
+            // Guard against an unhandled 'error' crashing the process (same EPIPE
+            // class of bug as the foreground stdin feeder): the launcher shell can
+            // die/fail and its stdio pipes emit errors with no default handling.
+            child.on('error', () => resolve(data));
+            child.stdout?.on('error', () => resolve(data));
             child.stdout?.on('data', (chunk) => { data += chunk; });
             child.on('close', () => resolve(data));
             setTimeout(() => { child.kill(); resolve(data); }, 5000);
@@ -614,7 +794,7 @@ export function getRunCommandTool(connectors?: ConnectorRegistry): ToolDefinitio
 
       // Foreground execution — exit-as-data: only spawn-level failures are isError.
       const streamCb = buildStreamCallback(context);
-      const outcome = await runForeground(command, workdir, buildEnv(input.env as Record<string, string> | undefined), timeout, streamCb);
+      const outcome = await runForeground(command, workdir, buildEnv(input.env as Record<string, string> | undefined), timeout, streamCb, context.abortSignal);
       if (outcome.spawnError) {
         return {
           content: [{ type: 'text', text: `Error: could not execute command: ${outcome.spawnError}\n\nCommand: ${command}` }],
@@ -675,7 +855,7 @@ export function getRunTestTool(): ToolDefinition {
       const workdir = input.workdir
         ? path.resolve(context.workspaceDir, String(input.workdir))
         : context.workspaceDir;
-      const timeout = Math.min(300_000, Math.max(1000, Number(input.timeout) || 300_000));
+      const timeout = Math.min(300_000, Math.max(1000, Number(input.timeout) || 30_000));
 
       // Same spawn-based runner as run_command: tail-kept capture, SIGTERM→
       // SIGKILL timeout, no maxBuffer blowups on chatty test suites.
@@ -685,6 +865,7 @@ export function getRunTestTool(): ToolDefinition {
         buildEnv({ CI: 'true' }),
         timeout,
         buildStreamCallback(context),
+        context.abortSignal,
       );
       if (outcome.spawnError) {
         return {

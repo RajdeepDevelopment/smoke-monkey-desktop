@@ -1,7 +1,7 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { Check, ChevronDown, ChevronRight, Search, Cpu, Star } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Bot, Check, ChevronDown, ChevronRight, Cpu, Search, Zap } from 'lucide-react';
 import type { ModelPreset, ModelProvider } from '@rag/contracts';
 import { useIsMobile } from '../../lib/hooks';
 import { cn } from '../../lib/utils';
@@ -17,6 +17,7 @@ import {
   SheetTitle,
   SheetTrigger,
 } from '../ui/sheet';
+import { BrandIcon } from '../BrandIcon';
 
 interface ModelPickerProps {
   providers: ModelProvider[];
@@ -26,6 +27,58 @@ interface ModelPickerProps {
   presets?: ModelPreset[];
   onChange: (provider: string, model: string) => void;
   compact?: boolean;
+}
+
+/**
+ * Brand-aware glyph per model provider: OpenRouter's arrow-through-circle,
+ * NVIDIA's green monogram, OmniRoute's free-mode zap, etc. Kept as lightweight
+ * inline SVG so it reads crisply at small sizes inside the composer.
+ */
+function ProviderIcon({ provider, className }: { provider: string; className?: string }) {
+  const id = provider.toLowerCase();
+
+  if (id === 'openrouter') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className={cn('shrink-0', className)} aria-hidden="true">
+        <circle
+          cx="12" cy="12" r="8.5"
+          stroke="currentColor" strokeWidth="1.5"
+          strokeDasharray="38 16" strokeLinecap="round"
+          transform="rotate(135 12 12)" opacity="0.85"
+        />
+        <path d="M8.5 15.5 14.8 9.2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+        <path d="M11 9.2h3.8v3.8" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+
+  if (id === 'nvidia') {
+    return (
+      <span
+        className={cn(
+          'flex shrink-0 items-center justify-center rounded-md text-[10px] font-extrabold leading-none',
+          className,
+        )}
+        style={{ background: '#76B900', color: '#0b0b0b' }}
+      >
+        n
+      </span>
+    );
+  }
+
+  if (id === 'omniroute') {
+    return <Zap className={cn('shrink-0 text-violet-400', className)} fill="currentColor" strokeWidth={1.4} />;
+  }
+
+  if (id === 'smokemonkey' || provider === 'big-pickle') {
+    return <BrandIcon size={16} className={cn('shrink-0 rounded', className)} />;
+  }
+
+  if (id === 'ollama') {
+    return <Bot className={cn('shrink-0 text-ink-secondary', className)} />;
+  }
+
+  return <Cpu className={cn('shrink-0 text-ink-muted', className)} />;
 }
 
 function presetFor(presets: ModelPreset[] | undefined, provider: string, model: string): ModelPreset | undefined {
@@ -53,10 +106,11 @@ function ModelOption({
       type="button"
       onClick={onSelect}
       className={cn(
-        'flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition-colors',
+        'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors',
         active ? 'bg-primary-subtle' : 'hover:bg-surface-800',
       )}
     >
+      <ProviderIcon provider={provider.id} className="h-4 w-4 text-ink-secondary" />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className={cn('truncate text-sm font-medium', active ? 'text-white' : 'text-ink-primary')}>
@@ -152,15 +206,16 @@ function ModelPickerPanel({
                 aria-expanded={expanded}
               >
                 <ChevronRight
-                  className={cn('h-3 w-3 shrink-0 transition-transform', expanded && 'rotate-90')}
+                  className={cn('h-3 w-3 shrink-0 text-ink-muted transition-transform duration-200', expanded && 'rotate-90')}
                 />
+                <ProviderIcon provider={p.id} className="h-3.5 w-3.5" />
                 <span className="truncate">{p.label}</span>
                 <span className="ml-auto shrink-0 rounded-full bg-surface-800 px-1.5 py-0.5 text-[10px] font-medium normal-case tracking-normal text-ink-secondary">
                   {models.length}
                 </span>
               </button>
               {expanded && (
-                <div className="space-y-0.5">
+                <div className="animate-fade-in space-y-0.5">
                   {models.map((m) => (
                     <ModelOption
                       key={m}
@@ -197,35 +252,67 @@ export function ModelPicker({
 }: ModelPickerProps) {
   const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
+  const [selectionNonce, setSelectionNonce] = useState(0);
   const currentProvider = providers.find((p) => p.id === provider);
   const currentLabel = compact ? model : `${currentProvider?.label ?? provider} · ${model}`;
-  const currentPreset = presetFor(presets ?? [], provider, model);
+
+  // A selection may trigger a parent re-render that bounces a stray
+  // open/close signal through Radix — guard `onOpenChange` and remount the
+  // picker (via `key={selectionNonce}`) so it is guaranteed to start fresh
+  // and closed after choosing a model, no matter what parent re-renders do.
+  const justSelected = useRef(false);
 
   const select = (p: string, m: string) => {
+    justSelected.current = true;
     onChange(p, m);
     setOpen(false);
+    setSelectionNonce((n) => n + 1);
+    requestAnimationFrame(() => {
+      justSelected.current = false;
+    });
   };
+
+  const handleOpenChange = (next: boolean) => {
+    if (next && justSelected.current) return;
+    setOpen(next);
+  };
+
+  // Belt-and-suspenders: any provider/model change implies a selection took
+  // place — make sure the picker collapses even if an outside signal reopened it.
+  const prevSelection = useRef<{ provider: string; model: string } | null>(null);
+  useEffect(() => {
+    const key = `${provider}:${model}`;
+    const prev = prevSelection.current;
+    prevSelection.current = { provider, model };
+    if (prev && `${prev.provider}:${prev.model}` !== key) {
+      justSelected.current = true;
+      setOpen(false);
+      requestAnimationFrame(() => { justSelected.current = false; });
+    }
+  }, [provider, model]);
 
   const trigger = (
     <button
       type="button"
       className="inline-flex h-9 min-h-9 min-w-0 max-w-full items-center gap-1.5 rounded-lg border border-surface-700 bg-surface-850 px-2.5 text-xs font-medium text-ink-secondary transition-colors hover:border-primary/40 hover:text-white"
       aria-label="Select model"
+      aria-expanded={open}
       title={currentLabel}
     >
-      {currentPreset?.role === 'reasoning' || currentPreset?.role === 'vision' ? (
-        <Star className="h-3.5 w-3.5 shrink-0 text-warning" />
-      ) : (
-        <Cpu className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
-      )}
+      <ProviderIcon provider={currentProvider?.id ?? provider} className="h-4 w-4 text-ink-secondary" />
       <span className="min-w-0 flex-1 truncate max-w-[130px] xs:max-w-[190px] sm:max-w-[260px]">{currentLabel}</span>
-      <ChevronDown className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
+      <ChevronDown
+        className={cn(
+          'h-3.5 w-3.5 shrink-0 text-ink-muted transition-transform duration-300 ease-out',
+          open && 'rotate-180',
+        )}
+      />
     </button>
   );
 
   if (isMobile) {
     return (
-      <Sheet open={open} onOpenChange={setOpen}>
+      <Sheet key={selectionNonce} open={open} onOpenChange={handleOpenChange}>
         <SheetTrigger asChild>{trigger}</SheetTrigger>
         <SheetContent side="bottom" className="max-h-[70vh] p-0">
           <SheetHeader className="border-b border-surface-800 px-4 py-3">
@@ -245,9 +332,13 @@ export function ModelPicker({
   }
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover key={selectionNonce} open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>{trigger}</PopoverTrigger>
-      <PopoverContent align="end" sideOffset={6} className="flex max-h-[min(560px,75vh)] w-[320px] max-w-[calc(100vw-24px)] flex-col overflow-hidden p-0">
+      <PopoverContent
+        align="end"
+        sideOffset={6}
+        className="flex max-h-[min(560px,75vh)] w-[320px] max-w-[calc(100vw-24px)] flex-col overflow-hidden p-0 animate-in fade-in-0 zoom-in-95 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95"
+      >
         <ModelPickerPanel
           providers={providers}
           provider={provider}

@@ -17,6 +17,11 @@ export interface ToolContext {
   eventEmitter?: import('../services/agent-event.emitter').AgentEventEmitter;
   /** When set, commands should execute on the remote host (SSH profile). */
   remoteSsh?: { destinationId: string; userId: string };
+  /**
+   * The run's live sub-context manager. context_manage mutates it in place;
+   * the next loop iteration re-renders the panel and feeds new guidance.
+   */
+  contextManager?: import('../context/sub-context').SubContextManager;
 }
 
 export interface ToolContent {
@@ -156,7 +161,11 @@ export class ToolRegistry {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger.error(`Tool ${name} failed: ${message}`);
-      return { success: false, output: `Error: ${message}` };
+      // isError MUST be set: downstream treats thrown failures as real
+      // failures (ToolFailed event, 'failed' status, phase demotion to
+      // RECOVER, completion detection). Without it a crashed tool would be
+      // disguised as a success.
+      return { success: false, output: `Error: ${message}`, isError: true };
     }
   }
 }

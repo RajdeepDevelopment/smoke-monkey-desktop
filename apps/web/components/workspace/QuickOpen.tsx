@@ -9,6 +9,7 @@ import { cn } from '../../lib/utils';
 interface Props {
   open: boolean;
   workspaceRoot: string;
+  recentFiles?: string[];
   onClose: () => void;
   onOpenFile: (path: string, line?: number) => void;
 }
@@ -17,7 +18,7 @@ interface Props {
  * VS Code-style Quick Open (⌘P). Fuzzy-filters a filename search of the
  * workspace; Enter/click opens the selected result.
  */
-export function QuickOpen({ open, workspaceRoot, onClose, onOpenFile }: Props) {
+export function QuickOpen({ open, workspaceRoot, recentFiles, onClose, onOpenFile }: Props) {
   const [query, setQuery] = useState('');
   const [files, setFiles] = useState<string[]>([]);
   const [selected, setSelected] = useState(0);
@@ -58,7 +59,16 @@ export function QuickOpen({ open, workspaceRoot, onClose, onOpenFile }: Props) {
   }, [open]);
 
   const scored = useMemo(() => {
-    if (!query.trim()) return files.slice(0, 50).map((p) => ({ path: p, score: 0 }));
+    if (!query.trim()) {
+      // VS Code-style: recently-visited files on top, then the indexed list.
+      const indexed = files.slice(0, 50);
+      const recent: string[] = [];
+      for (const p of recentFiles ?? []) {
+        if (files.includes(p) && !recent.includes(p)) recent.push(p);
+      }
+      const rest = indexed.filter((p) => !recent.includes(p));
+      return [...recent, ...rest].slice(0, 50).map((path) => ({ path, score: 0 }));
+    }
     const q = query.toLowerCase().replace(/\s+/g, '');
     const results: { path: string; score: number }[] = [];
     for (const path of files) {
@@ -83,7 +93,7 @@ export function QuickOpen({ open, workspaceRoot, onClose, onOpenFile }: Props) {
       }
     }
     return results.sort((a, b) => b.score - a.score).slice(0, 50);
-  }, [files, query, workspaceRoot]);
+  }, [files, query, workspaceRoot, recentFiles]);
 
   useEffect(() => {
     setSelected(0);

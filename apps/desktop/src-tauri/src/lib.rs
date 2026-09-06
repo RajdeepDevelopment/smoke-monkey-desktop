@@ -17,6 +17,10 @@ struct BackendHandle(Mutex<Vec<Child>>);
 // dev tools commonly squat on 127.0.0.1:3000 and swallow connections.
 const API_PORT: u16 = 8642;
 
+// Local rag-service (Python) port. The api-gateway proxies RAG + free-gate
+// ("OmniRoute") endpoints here (RAG_SERVICE_URL), so the desktop spawns it.
+const RAG_PORT: u16 = 8643;
+
 // The API server may end up listening on IPv4 or IPv6 only depending on the
 // Node version/system, so try both loopback stacks.
 fn connect_api() -> Result<TcpStream, String> {
@@ -818,7 +822,7 @@ fn find_node() -> Option<String> {
     None
 }
 
-fn spawn_api_server() -> Option<Child> {
+fn spawn_api_server(omni_bin: Option<&str>) -> Option<Child> {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let project_root = manifest.parent()?.parent()?.parent()?;
     let api_main = project_root.join("apps/api-gateway/dist/main.js");
@@ -840,10 +844,35 @@ fn spawn_api_server() -> Option<Child> {
 
     let env_file = project_root.join("apps/api-gateway/.env");
     let mut cmd = Command::new(&node_path);
+    let home = std::env::var("HOME").unwrap_or_default();
     cmd.arg(api_main.to_str()?)
         .current_dir(project_root)
+        .env("HOME", &home)
+        // GUI apps launched from Finder/Dock inherit a minimal PATH, so the
+        // node child would not be able to resolve `npm`/`omniroute` when the
+        // gateway's OmniRouteService installs/starts the OmniRoute gateway.
+        // Augment PATH so those tools (in nvm/homebrew bins) are visible.
+        .env("PATH", augmented_path())
         .env("DB_DRIVER", "sqlite")
-        .env("PORT", API_PORT.to_string());
+        .env("PORT", API_PORT.to_string())
+        // The local rag-service is spawned on RAG_PORT — pin the gateway to it
+        // so analytics/playground/chat all proxy there even if code defaults drift.
+        .env("RAG_SERVICE_URL", format!("http://127.0.0.1:{RAG_PORT}"))
+        // Real OmniRoute gateway (localhost:20128) is the internal LLM/agent
+        // backend. The api-gateway's OmniRouteService provisions a manage key
+        // (persisted to apps/api-gateway/.env as OMNIROUTE_API_KEY) and syncs
+        // the admin password on login, so the key comes from .env below.
+        .env("OMNIROUTE_ENABLED", "true")
+        .env("OMNIROUTE_BASE_URL", "http://localhost:20128/v1");
+
+    // Point the gateway at the omniroute CLI bundled inside the app bundle
+    // (Contents/Resources/omniroute) so no global install is needed. In dev
+    // builds the resource dir has no bundled CLI — OmniRouteService then
+    // falls back to a global `omniroute` on PATH.
+    if let Some(bin) = omni_bin {
+        cmd.env("OMNIROUTE_BIN", bin);
+        eprintln!("[smokemonkey] Using bundled OmniRoute at {bin}");
+    }
 
     if let Ok(contents) = std::fs::read_to_string(&env_file) {
         for line in contents.lines() {
@@ -866,6 +895,95 @@ fn spawn_api_server() -> Option<Child> {
             env_file.display()
         );
     }
+
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    Some(child)
+}
+
+fn find_rag_python(project_root: &std::path::Path) -> Option<String> {
+    // Packaged sidecar (PyInstaller) is preferred when present.
+    if let Ok(rag_backend) = std::env::var("RAG_BACKEND") {
+        if !rag_backend.is_empty() && std::path::Path::new(&rag_backend).exists() {
+            return Some(rag_backend);
+        }
+    }
+    // Dev / source checkout: the rag-service venv.
+    for py in [
+        project_root
+            .join("apps/rag-service/.venv/bin/python")
+            .to_str()
+            .map(str::to_string),
+        project_root
+            .join("rag-service/.venv/bin/python")
+            .to_str()
+            .map(str::to_string),
+    ] {
+        if let Some(p) = py {
+            if std::path::Path::new(&p).exists() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+fn rag_probe_healthy() -> bool {
+    let mut stream = match TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], RAG_PORT)),
+        Duration::from_millis(1000),
+    ) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    if stream
+        .write_all(b"GET /api/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut buf = [0u8; 1024];
+    match stream.read(&mut buf) {
+        Ok(n) => String::from_utf8_lossy(&buf[..n]).contains("200"),
+        Err(_) => false,
+    }
+}
+
+fn spawn_rag_service() -> Option<Child> {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let project_root = manifest.parent()?.parent()?.parent()?;
+    let venv_py = find_rag_python(project_root)?;
+
+    let data_dir = project_root.join("data/desktop");
+    let _ = std::fs::create_dir_all(&data_dir);
+
+    let mut cmd = Command::new(&venv_py);
+    cmd.arg("-m")
+        .arg("uvicorn")
+        .arg("src.main:app")
+        .arg("--app-dir")
+        .arg(project_root.join("apps/rag-service"))
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(RAG_PORT.to_string())
+        .env("STORAGE_MODE", "local")
+        .env("LOCAL_DATA_DIR", data_dir)
+        .env("WEB_SEARCH_ENABLED", "true")
+        // Free mode: the rag-service serves the OmniRoute-compatible surface
+        // (/v1 + /api/models/*) itself, so point OmniRoute at its own /v1.
+        .env("OMNIROUTE_ENABLED", "true")
+        .env("OMNIROUTE_BASE_URL", format!("http://127.0.0.1:{RAG_PORT}/v1"));
+
+    eprintln!(
+        "[smokemonkey] Starting rag-service on :{RAG_PORT} ({venv_py})"
+    );
 
     let child = cmd
         .stdin(Stdio::null())
@@ -913,45 +1031,71 @@ fn wait_for_api(timeout_ms: u64) {
 
 // ── Open in IDE ──────────────────────────────────────────────────────────
 
-#[tauri::command]
-fn open_in_ide(workspace_path: String) -> Result<(), String> {
-    // Try common Code OSS / Smoke Monkey IDE locations
+/// Resolve the path to a VS Code-family binary that actually exists and is
+/// executable, or `None` if no supported editor is installed. The `code` entry
+/// is resolved from PATH so a typical Homebrew install (`/opt/homebrew/bin/code`)
+/// is picked up without hardcoding it.
+fn resolve_ide() -> Option<String> {
     let candidates = if cfg!(target_os = "macos") {
         vec![
-            "/Applications/Smoke Monkey AI IDE.app/Contents/MacOS/Smoke Monkey AI IDE",
-            "/Applications/Visual Studio Code.app/Contents/MacOS/Visual Studio Code",
-            "/usr/local/bin/code",
+            "/Applications/Smoke Monkey AI IDE.app/Contents/MacOS/Smoke Monkey AI IDE".into(),
+            "/Applications/Visual Studio Code.app/Contents/MacOS/Visual Studio Code".into(),
+            "/usr/local/bin/code".into(),
+            "/opt/homebrew/bin/code".into(),
+            "code".into(),
         ]
     } else if cfg!(target_os = "linux") {
         vec![
-            "/usr/bin/code",
-            "/usr/share/code/code",
-            "code",
+            "/usr/bin/code".into(),
+            "/usr/share/code/code".into(),
+            "code".into(),
         ]
     } else {
         vec![
-            "C:\\Program Files\\Microsoft VS Code\\Code.exe",
-            "C:\\Program Files (x86)\\Microsoft VS Code\\Code.exe",
-            "code",
+            "C:\\Program Files\\Microsoft VS Code\\Code.exe".into(),
+            "C:\\Program Files (x86)\\Microsoft VS Code\\Code.exe".into(),
+            "code".into(),
         ]
     };
 
-    let mut cmd = std::process::Command::new("code");
-    let mut found = false;
-
-    for candidate in &candidates {
-        if std::path::Path::new(candidate).exists() || *candidate == "code" {
-            cmd = std::process::Command::new(candidate);
-            found = true;
-            break;
+    for candidate in candidates {
+        // "code" resolves through the process PATH, so we can't Path::exists it.
+        if candidate == "code" {
+            if std::process::Command::new("code")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                return Some(candidate);
+            }
+            continue;
+        }
+        let p = std::path::Path::new(&candidate);
+        if p.exists() {
+            return Some(candidate);
         }
     }
+    None
+}
 
-    if !found {
-        return Err("Code OSS / Smoke Monkey IDE not found".to_string());
-    }
+/// Probe whether a VS Code-family editor is installed (used to gate the
+/// "Open in IDE" button so it only shows when launching will actually work).
+#[tauri::command]
+fn ide_available() -> bool {
+    resolve_ide().is_some()
+}
 
-    cmd.arg(&workspace_path)
+#[tauri::command]
+fn open_in_ide(workspace_path: String) -> Result<(), String> {
+    let ide = resolve_ide().ok_or_else(|| {
+        "Visual Studio Code (or a VS Code-based editor) is not installed on this device. \
+         Install VS Code from https://code.visualstudio.com to use this feature."
+            .to_string()
+    })?;
+
+    std::process::Command::new(ide)
+        .arg(&workspace_path)
         .spawn()
         .map_err(|e| format!("Failed to launch IDE: {}", e))?;
 
@@ -979,22 +1123,50 @@ pub fn run() {
             detect_environment,
             classify_risk,
             open_in_ide,
+            ide_available,
         ])
         .setup(|app| {
             // Never block window startup on the API — do it in the background
             // so the UI renders immediately instead of freezing.
             let handle = app.handle().clone();
+
+            // Resolve the omniroute CLI bundled inside the app bundle
+            // (Contents/Resources/omniroute/node_modules/.bin/omniroute).
+            // Doesn't exist in dev builds → None → fall back to global install.
+            let omni_bin = app
+                .path()
+                .resource_dir()
+                .ok()
+                .map(|dir| dir.join("omniroute/node_modules/.bin/omniroute"))
+                .filter(|path| path.exists())
+                .map(|path| path.to_string_lossy().to_string());
+
             thread::spawn(move || {
+                let mut children: Vec<Child> = Vec::new();
+
+                // Start the local rag-service (free gateway / RAG proxy) unless a
+                // healthy one is already listening on :RAG_PORT.
+                if rag_probe_healthy() {
+                    eprintln!("[smokemonkey] Healthy rag-service already on port {RAG_PORT}, reusing it");
+                } else if let Some(rag) = spawn_rag_service() {
+                    eprintln!("[smokemonkey] rag-service spawned on :{RAG_PORT}");
+                    children.push(rag);
+                } else {
+                    eprintln!("[smokemonkey] rag-service unavailable (no Python/venv found)");
+                }
+
                 // Reuse an already-running healthy API instead of spawning
                 // duplicate servers that leak on force-quit.
                 if api_probe_healthy(500) {
                     eprintln!("[smokemonkey] Healthy API already on port {API_PORT}, reusing it");
-                    return;
+                } else if let Some(api) = spawn_api_server(omni_bin.as_deref()) {
+                    children.push(api);
+                    wait_for_api(20000);
                 }
-                let api = spawn_api_server();
-                let children: Vec<Child> = api.into_iter().collect();
-                handle.manage(BackendHandle(Mutex::new(children)));
-                wait_for_api(20000);
+
+                if !children.is_empty() {
+                    handle.manage(BackendHandle(Mutex::new(children)));
+                }
             });
             Ok(())
         })

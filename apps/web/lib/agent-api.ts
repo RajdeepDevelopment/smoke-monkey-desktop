@@ -20,6 +20,10 @@ export interface AgentMessage {
   sessionId: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
+  /** Model reasoning/thinking stream ("Thought phase") captured during
+   *  generation, shown in the UI as a foldable section. Never sent back
+   *  to the model on later turns. */
+  reasoning?: string | null;
   toolCalls?: Array<{
     id: string;
     toolName: string;
@@ -28,6 +32,18 @@ export interface AgentMessage {
     output?: string;
     result?: unknown;
     error?: string;
+    /** Live progress as streamed via tool.progress while the tool runs. */
+    progress?: {
+      kind: string;
+      path?: string;
+      percent?: number;
+      bytesWritten?: number;
+      bytesTotal?: number;
+      lines?: number;
+      linesTotal?: number;
+      preview?: string;
+      detail?: string;
+    };
   }> | null;
   parentMessageId?: string | null;
   tokensInput: number;
@@ -66,6 +82,16 @@ export interface FileTreeEntry {
   path: string;
 }
 
+/** One chat that matched a content search, with up to 3 matching snippets. */
+export interface ChatSearchResult {
+  sessionId: string;
+  title: string;
+  agentId: string;
+  updatedAt: string;
+  matchCount: number;
+  snippets: Array<{ content: string; createdAt: string; role: string }>;
+}
+
 function headers(): Record<string, string> {
   const h: Record<string, string> = { 'content-type': 'application/json' };
   const token = getToken();
@@ -99,11 +125,23 @@ export const agentApi = {
   getSession: (id: string) =>
     agentRequest<AgentSession>(`/api/agent/sessions/${id}`),
 
+  /** Search the CONTENT of a user's chats (messages), returning the sessions
+   *  that discussed the query. `q` can be empty → returns { results: [] }. */
+  searchChats: (q: string) =>
+    agentRequest<ChatSearchResult[]>(
+      `/api/agent/sessions/search?q=${encodeURIComponent(q)}`,
+    ),
+
   deleteSession: (id: string) =>
     agentRequest<{ status: string }>(`/api/agent/sessions/${id}`, { method: 'DELETE' }),
 
   getMessages: (sessionId: string) =>
     agentRequest<AgentMessage[]>(`/api/agent/sessions/${sessionId}/messages`),
+
+  getOlderMessages: (sessionId: string, beforeCreatedAt: string, beforeId: string) =>
+    agentRequest<{ messages: AgentMessage[]; hasMore: boolean }>(
+      `/api/agent/sessions/${sessionId}/messages?beforeCreatedAt=${encodeURIComponent(beforeCreatedAt)}&beforeId=${encodeURIComponent(beforeId)}`,
+    ),
 
   getRuns: (sessionId: string) =>
     agentRequest<AgentRun[]>(`/api/agent/sessions/${sessionId}/runs`),
@@ -197,8 +235,21 @@ export const agentApi = {
   getTools: () =>
     agentRequest<Array<{ name: string; description: string; parameters: unknown }>>('/api/agent/tools'),
 
+  getWorkspaceIndex: (workspacePath: string) =>
+    agentRequest<{
+      dbPath: string;
+      workspaceId: string;
+      files: number;
+      symbols: number;
+      imports: number;
+      exports: number;
+      lastBuilt: number;
+      ready: boolean;
+      error?: string;
+    }>(`/api/agent/workspace-index?path=${encodeURIComponent(workspacePath)}`),
+
   getModels: () =>
-    nativeFetch(`${API_URL}/api/models`).then(r => r.json()) as Promise<{ providers: Array<{ id: string; label: string; models: string[] }> }>,
+    agentRequest<{ providers: Array<{ id: string; label: string; models: string[] }> }>('/api/agent/models'),
 
   getPermissions: (workspace: string) =>
     agentRequest<Array<{ id: string; tool: string; resource: string; effect: string; scope: string }>>(

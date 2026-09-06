@@ -1,4 +1,8 @@
+import * as path from 'node:path';
+import * as fs from 'node:fs';
 import { TodoItem } from '../entities/agent-run.entity';
+import { SubContextManager } from '../context/sub-context';
+import type { McpRuntime } from '../../mcp/mcp.service';
 
 export interface LLMMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -41,6 +45,17 @@ export interface RunContext {
   runId: string;
   userId: string;
   workspacePath: string;
+
+  /**
+   * The effective working directory for tool calls. When the user's message
+   * names a specific project DIRECTORY that lives under the workspace root
+   * (e.g. they opened a parent folder holding several projects and said
+   * "work in ~/code/project-b"), this is set to that sub-project so run_command,
+   * read/write, and search all anchor there by default instead of the wrong root.
+   * Otherwise it equals workspacePath.
+   */
+  projectDir: string;
+
   agentId: string;
   provider?: string;
   model?: string;
@@ -72,6 +87,18 @@ export interface RunContext {
   /** Most recent policy violation (search loop, doom loop, blocked tool, ...).
    *  Surfaced in the runtime policy block and cleared once the model acts. */
   policyViolation: string | null;
+
+  /** When set, the run should stop immediately with a failure. Set by loop
+   *  guards (e.g. repeated unfixable build failures) to terminate a runaway. */
+  hardStopReason: string | null;
+
+  /**
+   * Set when the model invokes the `finish_task` tool — a STRUCTURAL completion
+   * signal that the run is done. Unlike prose parsing, this is deterministic:
+   * the runner checks it after a turn and finalizes immediately, breaking the
+   * loop without relying on final-report regexes.
+   */
+  finishSignal: { summary: string } | null;
 
   /** Durable cross-run summary state; merged on every compaction. */
   snapshot: ContextSnapshot;
@@ -105,6 +132,20 @@ export interface RunContext {
 
   /** Estimated tokens at the last compaction — avoids re-summarizing every check. */
   lastCompactTokens: number;
+
+  /**
+   * Per-run sub-context manager mutated by the `context_manage` tool. The live
+   * panel it renders is injected into the leading system message on EVERY loop
+   * iteration, so opening/closing a sub-context takes effect on the next LLM call.
+   */
+  contextManager: SubContextManager;
+
+  /**
+   * Per-run MCP runtime: lazy client handles for user-configured MCP servers.
+   * Active servers (whose mcp_<id> context is open) have their tools exposed
+   * to the model; deactivated servers are dormant but may be re-activated.
+   */
+  mcpRuntime?: McpRuntime;
 }
 
 export const CHARS_PER_TOKEN = 4;
@@ -148,6 +189,7 @@ const MODEL_CAPS: Record<string, ModelCaps> = {
   'nemotron-3-ultra-free': { contextWindow: 131072, maxOutputTokens: 32768 },
   'laguna-s-2.1-free': { contextWindow: 131072, maxOutputTokens: 16384 },
   'deepseek/deepseek-v4-flash:free': { contextWindow: 131072, maxOutputTokens: 16384 },
+  'openrouter/free': { contextWindow: 131072, maxOutputTokens: 16384 },
   'deepseek/deepseek-v4-flash': { contextWindow: 131072, maxOutputTokens: 16384 },
   'deepseek/deepseek-v4-pro': { contextWindow: 131072, maxOutputTokens: 16384 },
   'z-ai/glm-5.2': { contextWindow: 131072, maxOutputTokens: 16384 },
@@ -415,9 +457,9 @@ export function safeParseObject(raw: unknown): Record<string, unknown> {
 export type ToolGroupName = 'core' | 'exploration' | 'editing' | 'verification' | 'git' | 'docker';
 
 export const TOOL_GROUPS: Record<ToolGroupName, string[]> = {
-  core: ['read_file', 'list_directory', 'todo_write', 'ask_user'],
+  core: ['read_file', 'list_directory', 'inspect', 'todo_write', 'ask_user', 'context_manage', 'finish_task', 'secret_manager'],
   exploration: ['glob', 'grep', 'find_symbol', 'search_code', 'run_command'],
-  editing: ['edit_file', 'replace_lines', 'write_file', 'apply_patch', 'delete_file'],
+  editing: ['edit_file', 'line_edit', 'replace_lines', 'write_file', 'apply_patch', 'delete_file'],
   verification: ['run_command', 'run_test'],
   git: ['git_status', 'git_diff', 'git_log'],
   docker: ['docker_exec', 'docker_list'],
@@ -427,6 +469,7 @@ export const TOOL_GROUPS: Record<ToolGroupName, string[]> = {
 export const READ_ONLY_TOOLS = new Set([
   'read_file',
   'list_directory',
+  'inspect',
   'glob',
   'grep',
   'find_symbol',
@@ -449,6 +492,7 @@ export const SEARCH_FAMILY_TOOLS = new Set([
   'find_symbol',
   'search_code',
   'list_directory',
+  'inspect',
   'read_file',
 ]);
 
@@ -486,8 +530,19 @@ export function classifyTaskGroups(task: string, agentId: string): Set<ToolGroup
 
   groups.add('exploration');
 
-  const ambiguous = !wantsExplore && matchedGroups.length === 0;
-  if (wantsEdit || ambiguous) {
+  // Only an EXPLICIT coding ask (an edit verb, or an intent that mutates code)
+  // turns this into a coding task. A message with no coding intent at all —
+  // e.g. general conversation / a greeting / a casual question — stays
+  // read-only so the agent just answers (or asks for clarification) instead of
+  // scanning the project and entering the coding loop. This is what makes the
+  // agent behave like a "general conversation + code editor", not a perpetual
+  // project-scanning bot.
+  if (
+    wantsEdit ||
+    matchedGroups.includes('verification') ||
+    matchedGroups.includes('git') ||
+    matchedGroups.includes('docker')
+  ) {
     groups.add('editing');
   }
 
@@ -500,6 +555,84 @@ export function resolveExposedTools(groups: Set<ToolGroupName>): Set<string> {
   const names = new Set<string>();
   for (const g of groups) for (const n of TOOL_GROUPS[g]) names.add(n);
   return names;
+}
+
+// ---------------------------------------------------------------------------
+// Project-root resolution
+//
+// The user opens a folder that may contain SEVERAL projects, then tells the
+// agent to work on one by name/path ("work in ~/code/project-b", "fix the bug
+// in /Users/me/dev/apps/backend"). If we leave the working directory at the
+// parent root, run_command / read / write all target the wrong project and path
+// mixups cascade into failures.
+//
+// This scans the task for absolute paths that resolve INSIDE the workspace root
+// and that are an actual existing directory, then returns the deepest such dir.
+// The agent framework then anchors every tool call's default working directory
+// there (run_command workdir, relative file paths, search) so it consistently
+// operates on the named project instead of drifting back to the root.
+// ---------------------------------------------------------------------------
+export function resolveProjectDir(task: string, workspacePath: string): string {
+  if (!workspacePath) return workspacePath;
+  const root = path.resolve(workspacePath);
+
+  // Collect every absolute path the user mentioned in the message.
+  const candidates = new Set<string>();
+  const absRe = /(?:\/[A-Za-z0-9._~\/-]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = absRe.exec(task)) !== null) {
+    const raw = m[0].trim();
+    if (!raw || raw.length < 3) continue;
+    // Walk up from the full path to its parents so a path mentioning a file or
+    // non-existent-but-parental dir still resolves to an existing project dir.
+    let p = path.resolve(raw.replace(/\/$/, ''));
+    while (p && p.length >= root.length) {
+      if (p !== root) candidates.add(p);
+      const parent = path.dirname(p);
+      if (parent === p) break;
+      p = parent;
+    }
+  }
+
+  // Keep only candidates that actually exist, are directories, and live inside
+  // root. If a candidate is a FILE path (or doesn't exist yet), normalize it to
+  // the nearest existing directory ancestor — the working dir must be a real
+  // directory, not a file or a not-yet-created folder.
+  let best: string | null = null;
+  for (const c of candidates) {
+    if (c === root) continue;
+    let relative: string;
+    try {
+      relative = path.relative(root, c);
+    } catch {
+      continue;
+    }
+    if (relative.startsWith('..') || path.isAbsolute(relative)) continue;
+
+    // Resolve to an existing directory: the candidate itself, or its nearest
+    // existing ancestor (handles file paths and not-yet-created dirs).
+    let p = c;
+    while (p && p !== root && path.dirname(p) !== p) {
+      try {
+        if (fs.statSync(p).isDirectory()) break;
+      } catch {
+        /* keep walking up */
+      }
+      p = path.dirname(p);
+    }
+    let isDir = false;
+    try {
+      isDir = fs.statSync(p).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir || p === root) continue;
+
+    // Deepest wins (most specific project), comparing the normalized dirs.
+    if (!best || path.relative(root, p).length > path.relative(root, best).length) best = p;
+  }
+
+  return best || workspacePath;
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +657,7 @@ export type AgentPhase =
   | 'complete';
 
 /** Tools that change files — entering one of these means the run is EDITing. */
-export const FILE_MUTATING_TOOLS = new Set(['write_file', 'edit_file', 'replace_lines', 'apply_patch', 'delete_file']);
+export const FILE_MUTATING_TOOLS = new Set(['write_file', 'edit_file', 'line_edit', 'replace_lines', 'apply_patch', 'delete_file']);
 /** Command-family tools double as verification triggers once editing started. */
 const VERIFY_TRIGGER_TOOLS = new Set(['run_test', 'run_command']);
 
@@ -578,9 +711,14 @@ export const PHASE_TOOLS: Record<AgentPhase, Set<string>> = {
   understand: phaseTools('core', 'exploration'),
   explore: phaseTools('core', 'exploration'),
   plan: phaseTools('core', 'exploration'),
-  edit: phaseTools('core', 'editing'),
-  verify: phaseTools('core', 'verification'),
-  recover: phaseTools('core', 'editing', 'verification'),
+  // Editing/verifying/recovering still exposes the exploration tools (which
+  // back onto the SQLite WorkspaceIndex: find_symbol/search_code). Without
+  // them the model can only grep/read files once it starts working, so the
+  // pre-built index goes unused during the main do-loop. Exposure only grows,
+  // so including them here never hurts earlier phases.
+  edit: phaseTools('core', 'exploration', 'editing'),
+  verify: phaseTools('core', 'exploration', 'verification'),
+  recover: phaseTools('core', 'exploration', 'editing', 'verification'),
   complete: new Set(),
 };
 
@@ -598,11 +736,11 @@ export function phaseDirective(phase: AgentPhase): string | null {
     case 'plan':
       return 'CURRENT PHASE: PLAN — Record concrete steps with todo_write, then immediately begin executing them.';
     case 'edit':
-      return 'CURRENT PHASE: EDIT — Make the smallest correct changes, one logical change at a time. Do not start verifying until edits are coherent.';
+      return 'CURRENT PHASE: EDIT — Make the smallest correct changes, one logical change at a time. Do not start verifying until edits are coherent. To locate any symbol you must touch (definition, references, callers), call find_symbol or search_code FIRST — they resolve via the SQLite index in ~1ms instead of a full grep scan. Only use grep for fuzzy/regex text searches that a symbol lookup cannot answer.';
     case 'verify':
-      return 'CURRENT PHASE: VERIFY — Prove the changes work: run tests/builds/checks. If verification fails you will enter RECOVER: diagnose the root cause first.';
+      return 'CURRENT PHASE: VERIFY — Prove the changes work: run tests/builds/checks. If verification fails you will enter RECOVER: diagnose the root cause first. To understand a symbol behind a failure (definition, references, callers), use find_symbol/search_code, not grep.';
     case 'recover':
-      return 'CURRENT PHASE: RECOVER — A check failed. Read the failure carefully, find the ROOT CAUSE, fix it, then run the failing check again to return to VERIFY.';
+      return 'CURRENT PHASE: RECOVER — A check failed. Read the failure carefully, find the ROOT CAUSE, fix it, then run the failing check again to return to VERIFY. Trace the failing symbol with find_symbol/search_code (index-backed, instant) before reading files; use grep only for unstructured text. Do NOT loop on verify without first localizing the root cause.';
     case 'complete':
       return null;
   }

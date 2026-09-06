@@ -5,7 +5,7 @@ import { PlaygroundRetrieveDto } from './dto/playground-retrieve.dto';
 @Injectable()
 export class PlaygroundService {
   private readonly logger = new Logger(PlaygroundService.name);
-  private readonly ragUrl = process.env.RAG_SERVICE_URL || 'http://localhost:8000';
+  private readonly ragUrl = process.env.RAG_SERVICE_URL || 'http://127.0.0.1:8643';
 
   constructor(private readonly keys: ApiKeysService) {}
 

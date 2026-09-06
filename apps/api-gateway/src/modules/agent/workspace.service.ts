@@ -193,6 +193,18 @@ export class WorkspaceService {
     }
   }
 
+  /** Open the file with the OS-default application: PDF → browser/Preview,
+   *  PPT → PowerPoint/Keynote, XLSX → Excel/Numbers, etc. */
+  async openWithDefaultApp(p: string): Promise<void> {
+    if (process.platform === 'darwin') {
+      await execFileAsync('open', [p]).catch(() => execFileAsync('open', ['-R', p]));
+    } else if (process.platform === 'win32') {
+      await execFileAsync('cmd', ['/c', 'start', '', p]).catch(() => {});
+    } else {
+      await execFileAsync('xdg-open', [p]).catch(() => {});
+    }
+  }
+
   // ── Git ──────────────────────────────────────────────────────────────────
 
   private async git(cwd: string, args: string[]): Promise<string> {

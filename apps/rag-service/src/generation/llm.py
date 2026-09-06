@@ -279,11 +279,27 @@ def build_chat_llm(
     opencode_api_key: str = "",
     opencode_model: str | None = None,
     opencode_base_url: str = "",
+    huggingface_api_key: str = "",
+    huggingface_model: str | None = None,
+    huggingface_base_url: str = "",
     model: str | None = None,
     api_key: str | None = None,
 ) -> ChatLLM:
     """Build a chat LLM client for the requested provider (defaults from config)."""
     provider = (provider or "ollama").lower().strip()
+    if provider == "huggingface":
+        from src.generation.openrouter import OpenRouterClient
+
+        key = api_key or huggingface_api_key
+        if not key:
+            raise ValueError("no Hugging Face token available for the request (HUGGING_FACE_TOKEN or a saved user token)")
+        return OpenRouterClient(
+            api_key=key,
+            model=model or huggingface_model or "",
+            provider_id="huggingface",
+            name="Hugging Face",
+            base_url=huggingface_base_url or settings.huggingface_base_url,
+        )
     if provider == "opencode":
         from src.generation.openrouter import OpenRouterClient
 
@@ -374,4 +390,4 @@ def build_chat_llm(
             embed_model=ollama_embed_model,
             embed_dims=ollama_embed_dims,
         )
-    raise ValueError(f"unknown LLM provider: {provider} (expected 'ollama', 'openrouter', 'nvidia', 'openai', 'xai', 'gemini', 'opencode' or 'omniroute')")
+    raise ValueError(f"unknown LLM provider: {provider} (expected 'ollama', 'openrouter', 'nvidia', 'openai', 'xai', 'gemini', 'huggingface', 'opencode' or 'omniroute')")

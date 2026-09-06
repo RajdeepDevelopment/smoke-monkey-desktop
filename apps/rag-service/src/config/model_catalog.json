@@ -1,14 +1,35 @@
 {
   "providers": {
-    "openrouter": { "label": "OpenRouter" },
-    "nvidia": { "label": "NVIDIA NIM" },
-    "openai": { "label": "OpenAI — ChatGPT" },
-    "xai": { "label": "xAI — Grok" },
-    "ollama": { "label": "Local (Ollama)" },
-    "gemini": { "label": "Google Gemini" },
-    "opencode": { "label": "OpenCode Zen (free)" },
-    "omniroute": { "label": "OmniRoute (free, keyless)" },
-    "anthropic": { "label": "Anthropic — Claude" }
+    "openrouter": {
+      "label": "OpenRouter"
+    },
+    "nvidia": {
+      "label": "NVIDIA NIM"
+    },
+    "openai": {
+      "label": "OpenAI — ChatGPT"
+    },
+    "xai": {
+      "label": "xAI — Grok"
+    },
+    "ollama": {
+      "label": "Local (Ollama)"
+    },
+    "gemini": {
+      "label": "Google Gemini"
+    },
+    "opencode": {
+      "label": "OpenCode Zen (free)"
+    },
+    "omniroute": {
+      "label": "OmniRoute (free, keyless)"
+    },
+    "anthropic": {
+      "label": "Anthropic — Claude"
+    },
+    "huggingface": {
+      "label": "Hugging Face (cloud)"
+    }
   },
   "presets": [
     {
@@ -55,6 +76,24 @@
       "rating": 5,
       "isFree": false,
       "notes": "Strong coding at lower cost than Claude/GPT"
+    },
+    {
+      "role": "hf-main",
+      "label": "Hugging Face chat",
+      "provider": "huggingface",
+      "model": "Qwen/Qwen2.5-72B-Instruct",
+      "rating": 5,
+      "isFree": true,
+      "notes": "HF Qwen 2.5 72B — verified FREE on a Basic token (bring your own token)"
+    },
+    {
+      "role": "hf-fast",
+      "label": "HF fast model",
+      "provider": "huggingface",
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "rating": 4,
+      "isFree": true,
+      "notes": "Fast, widely-enabled Llama on the HF Inference API"
     },
     {
       "role": "agentic-flagship",

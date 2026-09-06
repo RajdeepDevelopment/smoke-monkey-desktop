@@ -83,8 +83,8 @@ export default function AgentPage() {
   const [activeFileIndex, setActiveFileIndex] = useState(-1);
   const [workspacePath, setWorkspacePath] = useState('');
   const [loading, setLoading] = useState(true);
-  const [selectedModel, setSelectedModel] = useState('nvidia/nemotron-3-nano-30b-a3b');
-  const [selectedProvider, setSelectedProvider] = useState('nvidia');
+  const [selectedModel, setSelectedModel] = useState('big-pickle');
+  const [selectedProvider, setSelectedProvider] = useState('omniroute');
   const [providers, setProviders] = useState<ModelProvider[]>([]);
   const [fileTreeLoading, setFileTreeLoading] = useState(false);
 
@@ -98,6 +98,19 @@ export default function AgentPage() {
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
   const [injectedPrompt, setInjectedPrompt] = useState<{ text: string; nonce: number } | null>(null);
   const [autoSave, setAutoSave] = useState(true);
+
+  // Restore recently-opened files from localStorage so they survive reloads
+  // and don't vanish every session.
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('sm-recent-files');
+      if (raw) setRecentFiles(JSON.parse(raw).filter((p: unknown) => typeof p === 'string'));
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    try { localStorage.setItem('sm-recent-files', JSON.stringify(recentFiles)); } catch { /* ignore */ }
+  }, [recentFiles]);
 
   // ── Remote-SSH mode ─────────────────────────────────────────────────────
   const [sshProfiles, setSshProfiles] = useState<SshProfile[]>([]);
@@ -155,6 +168,30 @@ export default function AgentPage() {
 
   const workspacePathRef = useRef(workspacePath);
   workspacePathRef.current = workspacePath;
+
+  // Remember the last chosen workspace per user so, after the first-time
+  // folder pick, the agent opens straight into that directory instead of a
+  // server-computed default (e.g. the gateway's cwd).
+  const workspaceStorageKey = useMemo(() => {
+    const uid = (user as { id?: string } | null)?.id || 'anon';
+    return `sm-agent-workspace:${uid}`;
+  }, [user]);
+
+  useEffect(() => {
+    if (!workspacePath) return;
+    try { localStorage.setItem(workspaceStorageKey, workspacePath); } catch { /* ignore */ }
+  }, [workspacePath, workspaceStorageKey]);
+
+  // First-time (fresh user / no persisted path): leave the empty-state gate
+  // requiring a folder choice. If a path was persisted from a prior visit and
+  // no active session supplies one, restore it so we don't drop back to a
+  // server-computed default.
+  useEffect(() => {
+    if (workspacePath || activeSession?.workspacePath) return;
+    let saved = '';
+    try { saved = localStorage.getItem(workspaceStorageKey) || ''; } catch { /* ignore */ }
+    if (saved) setWorkspacePath(saved);
+  }, [workspacePath, activeSession, workspaceStorageKey]);
 
   useEffect(() => { loadSessions(); loadModels(); }, []);
 
@@ -342,11 +379,20 @@ export default function AgentPage() {
 
   const handleStatusChange = useCallback((running: boolean) => {
     setIsRunning(running);
-    if (!running && activeSession) {
+    if (running) {
+      // A run just started — refresh sessions so the active one shows its
+      // auto-generated title while still running.
+      loadSessions();
+    } else if (activeSession) {
       agentApi.getSession(activeSession.id).then(setActiveSession).catch(() => {});
       loadSessions();
+      // The agent may have created/modified files during the run — refresh the
+      // file tree and git status so they appear immediately, without waiting
+      // for a manual refresh click.
+      loadFileTree(workspacePathRef.current);
+      loadGitStatus(workspacePathRef.current);
     }
-  }, [activeSession]);
+  }, [activeSession, loadFileTree, loadGitStatus]);
 
   // ── Editor operations ───────────────────────────────────────────────────
   const handleFileSelect = useCallback(async (path: string, line?: number) => {
@@ -357,7 +403,7 @@ export default function AgentPage() {
     const existingIndex = openFiles.findIndex((f) => f.path === path);
     if (existingIndex >= 0) {
       setActiveFileIndex(existingIndex);
-      setRecentFiles((prev) => [path, ...prev.filter((p) => p !== path)].slice(0, 8));
+      setRecentFiles((prev) => [path, ...prev.filter((p) => p !== path)].slice(0, 12));
       return;
     }
 
@@ -397,7 +443,7 @@ export default function AgentPage() {
       const newIndex = openFiles.length;
       setOpenFiles((prev) => [...prev, { path, name: getFileName(path), content, originalContent: content, modified: false, kind, raw }]);
       setActiveFileIndex(newIndex);
-      setRecentFiles((prev) => [path, ...prev.filter((p) => p !== path)].slice(0, 8));
+      setRecentFiles((prev) => [path, ...prev.filter((p) => p !== path)].slice(0, 12));
     } catch (err) {
       console.error('Failed to read file:', err);
     }
@@ -530,6 +576,31 @@ export default function AgentPage() {
     if (first) setSelectedModel(first);
   }, [providers]);
 
+  // When the model list loads (or the env-valid set changes), clamp
+  // selectedModel so a stale/invalid value can never reach the run endpoint.
+  // Preserve 'omniroute'/'big-pickle' default free models when the provider
+  // isn't in the list yet (e.g. gateway starting up).
+  useEffect(() => {
+    if (providers.length === 0) return;
+    const providerModels = providers.find((p) => p.id === selectedProvider)?.models ?? [];
+    if (providerModels.length === 0) {
+      // Current provider not found or has no models — fall back to first provider
+      // unless the current selection is the default omniroute/big-pickle.
+      if (!(selectedProvider === 'omniroute' && selectedModel === 'big-pickle')) {
+        const fallback = providers[0];
+        setSelectedProvider(fallback.id);
+        setSelectedModel(fallback.models[0] || '');
+      }
+      return;
+    }
+    if (selectedModel && providerModels.includes(selectedModel)) return;
+    // selectedModel is missing from valid list — snap to first valid model.
+    // But keep omniroute/big-pickle as default if currently selected.
+    if (!(selectedProvider === 'omniroute' && selectedModel === 'big-pickle')) {
+      setSelectedModel(providerModels[0]);
+    }
+  }, [providers, selectedProvider, selectedModel]);
+
   const currentModels = providers.find((p) => p.id === selectedProvider)?.models || [];
 
   // Empty state — no sessions yet
@@ -561,19 +632,22 @@ export default function AgentPage() {
           </div>
 
           <div className="flex justify-center gap-2">
-            <button onClick={() => handleNewSession('build')} disabled={loading}
-              className="flex items-center gap-1 rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground hover:bg-primary-hover transition-colors">
+            <button onClick={() => handleNewSession('build')} disabled={loading || !workspacePath}
+              className="flex items-center gap-1 rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground hover:bg-primary-hover transition-colors disabled:cursor-not-allowed disabled:opacity-40">
               <Plus className="h-3 w-3" /> Build
             </button>
-            <button onClick={() => handleNewSession('explore')} disabled={loading}
-              className="flex items-center gap-1 rounded-lg glass-panel px-3 py-2 text-xs text-ink-muted glass-hover transition-colors">
+            <button onClick={() => handleNewSession('explore')} disabled={loading || !workspacePath}
+              className="flex items-center gap-1 rounded-lg glass-panel px-3 py-2 text-xs text-ink-muted glass-hover transition-colors disabled:cursor-not-allowed disabled:opacity-40">
               <Plus className="h-3 w-3" /> Explore
             </button>
-            <button onClick={() => handleNewSession('plan')} disabled={loading}
-              className="flex items-center gap-1 rounded-lg glass-panel px-3 py-2 text-xs text-ink-muted glass-hover transition-colors">
+            <button onClick={() => handleNewSession('plan')} disabled={loading || !workspacePath}
+              className="flex items-center gap-1 rounded-lg glass-panel px-3 py-2 text-xs text-ink-muted glass-hover transition-colors disabled:cursor-not-allowed disabled:opacity-40">
               <Plus className="h-3 w-3" /> Plan
             </button>
           </div>
+          {!workspacePath && (
+            <p className="text-[11px] text-warning">Choose a folder first — the agent can't run without a workspace path.</p>
+          )}
         </div>
       </div>
     );
@@ -581,6 +655,7 @@ export default function AgentPage() {
 
   const activeFilePath = openFiles[activeFileIndex]?.path;
   const activeConflictPath = activeFilePath && conflicts[activeFilePath] ? activeFilePath : null;
+  const previewFile = activeFileIndex >= 0 ? openFiles[activeFileIndex] ?? null : null;
 
   return (
     <>
@@ -588,6 +663,14 @@ export default function AgentPage() {
         workspacePath={workspacePath}
         breadcrumbs={breadcrumbs}
         isAgentRunning={isRunning}
+        onSwitchWorkspace={async () => {
+          const folder = await openFolderPicker();
+          if (folder) {
+            setWorkspacePath(folder);
+            setOpenFiles([]);
+            setConflicts({});
+          }
+        }}
         gitChangeCount={gitStatus?.entries.length ?? 0}
         remote={remoteConnection}
         onRemoteChange={(id) => {
@@ -673,6 +756,11 @@ export default function AgentPage() {
             onDisconnectRemote={() => void handleModeSwitch(null)}
           />
         }
+        sessionTitle={activeSession.title || 'Smoke Monkey'}
+        sessions={sessions}
+        activeSessionId={activeSession.id}
+        onNewSession={() => handleNewSession('build')}
+        onSelectSession={(s) => { setActiveSession(s as AgentSession); setIsRunning(s.status === 'running'); }}
         editorArea={
           <EditorArea
             openFiles={openFiles}
@@ -690,6 +778,7 @@ export default function AgentPage() {
             gotoLine={gotoLine}
             recentFiles={recentFiles}
             onQuickOpen={() => setQuickOpen(true)}
+            onOpenFile={handleFileSelect}
             onAgentPrompt={(text) => setInjectedPrompt({ text, nonce: Date.now() })}
             autoSave={autoSave}
             onToggleAutoSave={toggleAutoSave}
@@ -724,10 +813,16 @@ export default function AgentPage() {
             />
           )
         }
+        filePreview={
+          previewFile
+            ? { file: previewFile, onClose: () => closeFile(activeFileIndex) }
+            : null
+        }
       />
       <QuickOpen
         open={quickOpen}
         workspaceRoot={workspacePath}
+        recentFiles={recentFiles}
         onClose={() => setQuickOpen(false)}
         onOpenFile={(p) => handleFileSelect(p)}
       />

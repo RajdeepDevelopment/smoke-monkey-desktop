@@ -2,16 +2,15 @@
 
 import { usePathname, useRouter } from 'next/navigation';
 import {
-  LayoutDashboard, MessageSquare, Code2, BookOpen, Cpu, Zap,
+  LayoutDashboard, Plug, Code2, BookOpen, Cpu, Zap,
   BarChart3, Settings, LogOut,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useAuth } from '../AuthProvider';
 
 const NAV_ITEMS = [
-  { href: '/', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/chat', label: 'Chat', icon: MessageSquare },
-  { href: '/agent', label: 'Agent', icon: Code2 },
+  { href: '/', label: 'Agent', icon: Code2 },
+  { href: '/mcp', label: 'MCP', icon: Plug },
   { href: '/documents', label: 'Knowledge Base', icon: BookOpen },
   { href: '/models', label: 'Models', icon: Cpu },
   { href: '/playground', label: 'Playground', icon: Zap },

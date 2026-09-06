@@ -1,12 +1,14 @@
 'use client';
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   Plus, Trash2, MessageSquare, Search as SearchIcon,
   ChevronDown, ChevronRight, Shield, Terminal as TerminalIcon,
   PanelBottom, RefreshCw, FolderDown, GitCompare,
+  FileSearch, TextSearch, Loader2, Sparkles,
 } from 'lucide-react';
-import type { AgentSession } from '../../lib/agent-api';
+import type { AgentSession, ChatSearchResult } from '../../lib/agent-api';
+import { agentApi } from '../../lib/agent-api';
 import type { GitStatusEntry, GitStatusResult } from '../../lib/ide-api';
 import { FileExplorer } from '../workspace/FileExplorer';
 import type { WorkspaceClient } from '../../lib/workspace-client';
@@ -172,6 +174,68 @@ export function SidePanelContent({
   const [showNewSession, setShowNewSession] = useState(false);
   const [newSessionTitle, setNewSessionTitle] = useState('');
   const [sessionSearch, setSessionSearch] = useState('');
+  const [chatSearchMode, setChatSearchMode] = useState<'titles' | 'chats'>('chats');
+  const [chatResults, setChatResults] = useState<ChatSearchResult[]>([]);
+  const [chatSearching, setChatSearching] = useState(false);
+  const chatDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestChatQueryRef = useRef('');
+
+  const runChatSearch = useCallback(async (q: string) => {
+    if (!q.trim()) {
+      latestChatQueryRef.current = '';
+      setChatResults([]);
+      setChatSearching(false);
+      return;
+    }
+    latestChatQueryRef.current = q;
+    setChatSearching(true);
+    try {
+      const res = await agentApi.searchChats(q);
+      if (latestChatQueryRef.current === q) setChatResults(res ?? []);
+    } catch {
+      if (latestChatQueryRef.current === q) setChatResults([]);
+    } finally {
+      if (latestChatQueryRef.current === q) setChatSearching(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (chatSearchMode !== 'chats') return;
+    if (chatDebounceRef.current) clearTimeout(chatDebounceRef.current);
+    chatDebounceRef.current = setTimeout(() => void runChatSearch(sessionSearch), 250);
+    return () => {
+      if (chatDebounceRef.current) clearTimeout(chatDebounceRef.current);
+    };
+  }, [sessionSearch, chatSearchMode, runChatSearch]);
+
+  const handleOpenSearchSession = useCallback(async (result: ChatSearchResult) => {
+    const known = sessions.find((s) => s.id === result.sessionId);
+    if (known) {
+      onSelectSession(known);
+      return;
+    }
+    try {
+      const s = await agentApi.getSession(result.sessionId);
+      onSelectSession(s);
+    } catch { /* session may have been deleted */ }
+  }, [sessions, onSelectSession]);
+
+  const highlight = (text: string, q: string) => {
+    if (!q || !q.trim()) return text;
+    try {
+      const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(`(${escaped})`, 'ig');
+      return text.split(re).map((part, i) =>
+        i % 2 === 1 ? (
+          <mark key={i} className="rounded-sm bg-primary-subtle px-0 text-primary-hover">{part}</mark>
+        ) : (
+          <span key={i}>{part}</span>
+        ),
+      );
+    } catch {
+      return text;
+    }
+  };
 
   const currentModels = providers.find((p) => p.id === selectedProvider)?.models || [];
 
@@ -297,41 +361,112 @@ export function SidePanelContent({
             </div>
           )}
 
-          <div className="scrollbar-thin min-h-0 flex-1 space-y-2 overflow-y-auto px-1.5 py-1">
-            <div className="px-0.5 pb-1">
+          <div className="scrollbar-thin flex min-h-0 flex-1 flex-col overflow-y-auto px-1.5 py-1">
+            <div className="space-y-1 pb-1">
               <div className="relative">
                 <SearchIcon className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-ink-muted" />
                 <input value={sessionSearch} onChange={(e) => setSessionSearch(e.target.value)}
-                  placeholder="Search sessions..."
+                  placeholder={chatSearchMode === 'chats' ? 'Search chat contents…' : 'Search sessions…'}
                   className="glass-panel w-full rounded-md py-1 pl-7 pr-2 text-[11px] outline-none placeholder:text-ink-muted/50 focus:ring-1 focus:ring-ring" />
+                {chatSearching && <Loader2 className="absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 animate-spin text-primary-hover" />}
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="flex overflow-hidden rounded border border-border/70">
+                  <button onClick={() => setChatSearchMode('titles')} title="Search by session title"
+                    className={cn('flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium transition-colors',
+                      chatSearchMode === 'titles' ? 'bg-primary-subtle text-foreground' : 'text-ink-muted hover:text-foreground')}>
+                    <FileSearch className="h-3 w-3" /> Titles
+                  </button>
+                  <button onClick={() => setChatSearchMode('chats')} title="Search inside the chat messages"
+                    className={cn('flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium transition-colors',
+                      chatSearchMode === 'chats' ? 'bg-primary-subtle text-foreground' : 'text-ink-muted hover:text-foreground')}>
+                    <TextSearch className="h-3 w-3" /> Contents
+                  </button>
+                </div>
+                {chatSearchMode === 'chats' && sessionSearch.trim() && (
+                  <span className="ml-auto max-w-[50%] truncate text-[9px] text-ink-muted">
+                    {chatSearching ? 'searching…' : `${chatResults.reduce((n, r) => n + r.matchCount, 0)} match${chatResults.length === 1 ? '' : 'es'} · ${chatResults.length} chat${chatResults.length === 1 ? '' : 's'}`}
+                  </span>
+                )}
               </div>
             </div>
-            {groupedSessions.today.length > 0 && (
-              <SessionGroup label="Today" sessions={groupedSessions.today} activeSession={activeSession}
-                onSelect={(s) => onSelectSession(s)}
-                onDelete={onDeleteSession} />
-            )}
-            {groupedSessions.yesterday.length > 0 && (
-              <SessionGroup label="Yesterday" sessions={groupedSessions.yesterday} activeSession={activeSession}
-                onSelect={(s) => onSelectSession(s)}
-                onDelete={onDeleteSession} />
-            )}
-            {groupedSessions.older.length > 0 && (
-              <SessionGroup label="Older" sessions={groupedSessions.older} activeSession={activeSession}
-                onSelect={(s) => onSelectSession(s)}
-                onDelete={onDeleteSession} />
-            )}
-            {sessions.length === 0 && (
-              <div className="flex flex-col items-center justify-center h-32 text-ink-muted">
-                <MessageSquare className="mb-1 h-6 w-6 opacity-30" />
-                <p className="text-[10px]">No sessions yet</p>
-              </div>
-            )}
-            {sessions.length > 0 && filteredSessions.length === 0 && (
-              <div className="flex flex-col items-center justify-center h-24 text-ink-muted">
-                <SearchIcon className="mb-1 h-4 w-4 opacity-40" />
-                <p className="text-[10px]">No sessions match “{sessionSearch}”</p>
-              </div>
+
+            {chatSearchMode === 'chats' && sessionSearch.trim() !== '' ? (
+              chatResults.length === 0 && !chatSearching ? (
+                <div className="flex h-28 flex-col items-center justify-center px-4 text-center text-ink-muted">
+                  <SearchIcon className="mb-1 h-5 w-5 opacity-30" />
+                  <p className="text-[10px]">No chats mention “{sessionSearch}”</p>
+                  <p className="mt-0.5 text-[9px] text-ink-muted/60">Try a phrase, a command, or a file name from the conversation</p>
+                </div>
+              ) : (
+                <div className="space-y-2.5 pt-0.5">
+                  {chatResults.map((r) => (
+                    <div key={r.sessionId}>
+                      <button onClick={() => void handleOpenSearchSession(r)}
+                        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-white/[0.04]">
+                        <span className="min-w-0 flex-1 truncate text-[11px] font-medium">{r.title || 'Untitled'}</span>
+                        <span className="shrink-0 text-[9px] text-ink-muted">{fmtDate(r.updatedAt)}</span>
+                        <span className="shrink-0 rounded-full bg-primary-subtle px-1.5 text-[9px] font-medium text-primary-hover">{r.matchCount}</span>
+                      </button>
+                      <div className="ml-2 mt-0.5 space-y-0.5 border-l border-border/40 pl-2">
+                        {r.snippets.map((sn, i) => (
+                          <button key={i} onClick={() => void handleOpenSearchSession(r)}
+                            className="block w-full rounded px-1.5 py-0.5 text-left transition-colors hover:bg-white/[0.04]">
+                            <span className="mb-0.5 flex items-center gap-1 text-[8.5px] font-semibold uppercase tracking-wide text-ink-muted">
+                              {sn.role === 'user' ? 'You' : (
+                                <span className="inline-flex items-center gap-1"><Sparkles className="h-2.5 w-2.5 text-primary-hover" /> Agent</span>
+                              )}
+                              <span className="font-normal normal-case text-ink-muted/60">· {fmtDate(sn.createdAt)}</span>
+                            </span>
+                            <span className="line-clamp-2 whitespace-pre-wrap break-words text-[10.5px] leading-snug text-ink-secondary">
+                              {highlight(sn.content, sessionSearch)}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  {chatResults.length === 0 && chatSearching && (
+                    <div className="flex h-20 items-center justify-center text-[10px] text-ink-muted">Searching chats…</div>
+                  )}
+                </div>
+              )
+            ) : (
+              <>
+                {groupedSessions.today.length > 0 && (
+                  <SessionGroup label="Today" sessions={groupedSessions.today} activeSession={activeSession}
+                    onSelect={(s) => onSelectSession(s)}
+                    onDelete={onDeleteSession} />
+                )}
+                {groupedSessions.yesterday.length > 0 && (
+                  <SessionGroup label="Yesterday" sessions={groupedSessions.yesterday} activeSession={activeSession}
+                    onSelect={(s) => onSelectSession(s)}
+                    onDelete={onDeleteSession} />
+                )}
+                {groupedSessions.older.length > 0 && (
+                  <SessionGroup label="Older" sessions={groupedSessions.older} activeSession={activeSession}
+                    onSelect={(s) => onSelectSession(s)}
+                    onDelete={onDeleteSession} />
+                )}
+                {sessions.length === 0 && (
+                  <div className="flex flex-col items-center justify-center h-32 text-ink-muted">
+                    <MessageSquare className="mb-1 h-6 w-6 opacity-30" />
+                    <p className="text-[10px]">No sessions yet</p>
+                  </div>
+                )}
+                {sessions.length > 0 && sessionSearch.trim() === '' && groupedSessions.today.length === 0 && groupedSessions.yesterday.length === 0 && groupedSessions.older.length === 0 && (
+                  <div className="flex flex-col items-center justify-center h-24 text-ink-muted">
+                    <MessageSquare className="mb-1 h-5 w-5 opacity-30" />
+                    <p className="text-[10px]">Start a chat to see it here</p>
+                  </div>
+                )}
+                {sessions.length > 0 && sessionSearch.trim() !== '' && filteredSessions.length === 0 && (
+                  <div className="flex flex-col items-center justify-center h-24 text-ink-muted">
+                    <SearchIcon className="mb-1 h-4 w-4 opacity-40" />
+                    <p className="text-[10px]">No sessions match “{sessionSearch}”</p>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </>

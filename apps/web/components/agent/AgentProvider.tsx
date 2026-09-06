@@ -233,6 +233,9 @@ export function AgentProvider({ sessionId, children }: { sessionId: string; chil
           error: type === 'run.failed' ? (data.error as string) : undefined,
         }));
         agentStartTimeRef.current = 0;
+        // Reload messages to surface the final persisted transcript (tool results
+        // and any post-stream assistant messages flushed to the DB on finalize).
+        void loadMessages(sessionId);
         break;
     }
   }, [sessionId]);

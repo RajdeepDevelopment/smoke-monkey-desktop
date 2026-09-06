@@ -5,7 +5,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 @UseGuards(JwtAuthGuard)
 export class AnalyticsController {
   private readonly logger = new Logger(AnalyticsController.name);
-  private readonly ragUrl = process.env.RAG_SERVICE_URL || 'http://localhost:8000';
+  private readonly ragUrl = process.env.RAG_SERVICE_URL || 'http://127.0.0.1:8643';
 
   @Get('metrics')
   async metrics(): Promise<unknown> {

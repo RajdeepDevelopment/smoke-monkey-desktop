@@ -5,12 +5,14 @@ import { AgentRunService } from './agent-run.service';
 import { AgentSessionService } from './agent-session.service';
 import { AgentPermissionService } from './agent-permission.service';
 import { AgentEventEmitter } from './agent-event.emitter';
-import { ToolRegistry } from '../tools/tool-registry';
+import { ToolRegistry, ToolResult } from '../tools/tool-registry';
 import { ContextCompactionService } from './compaction.service';
 import { enrichToolResult, ensureRunDirs } from './artifact-store';
 import { WorkspaceIndex } from './workspace-index';
 import { AgentConfigService } from './agent-config.service';
 import { ApiKeysService } from '../../keys/api-keys.service';
+import { SecretsService } from '../../secrets/secrets.service';
+import { McpService, McpRuntime } from '../../mcp/mcp.service';
 import { ExplorerService } from './subagent.service';
 import {
   AgentPhase,
@@ -35,6 +37,7 @@ import {
   nextPhaseOnResult,
   phaseDirective,
   resolveExposedTools,
+  resolveProjectDir,
   resolveTokenBudget,
   safeParseObject,
   snapshotToSystemMessage,
@@ -43,6 +46,15 @@ import {
 import { AgentMessage, ToolCallJson } from '../entities/agent-message.entity';
 import { AgentState } from '../entities/agent-run.entity';
 import { PermissionEffect } from '../entities/agent-permission.entity';
+import {
+  SubContextManager,
+  renderContextPanel,
+  renderSystemPromptCatalog,
+  recommendSubContextsForTask,
+  getSubContext,
+  MAX_ACTIVE_CONTEXTS,
+  MAX_ACTIVE_MCP,
+} from '../context/sub-context';
 
 export interface AgentRunRequest {
   sessionId: string;
@@ -69,11 +81,23 @@ interface LLMResponse {
   tool_calls: LLMToolCall[];
   usage?: { prompt_tokens: number; completion_tokens: number };
   finish_reason?: string | null;
+  /** Model reasoning/thinking stream ("Thought phase"), e.g. DeepSeek
+   *  `reasoning_content`, OpenAI `reasoning`, Anthropic-style `thinking`. */
+  reasoning?: string | null;
 }
 
 const MAX_STEPS = 1000;
 const MAX_SAME_ERROR = 3;
-const MAX_SAME_TOOL_CALLS = 10;
+
+/** Default hard cap on any single tool execution if the tool itself does not
+ *  declare its own timeout. Prevents a tool/command from spinning forever
+ *  without a completion — the terminal tools surface the timeout as data. */
+const DEFAULT_TOOL_TIMEOUT_MS = 180_000;
+/** File-mutation tools stream large payloads (multi-MB writes, whole-file
+ * edits, big patches) and legitimately need longer than the generic cap —
+ * a 7-minute ceiling so a 2MB docs write is never killed mid-stream. */
+const LONG_TOOL_TIMEOUT_MS = 7 * 60_000;
+const LONG_TOOL_NAMES = new Set(['write_file', 'edit_file', 'apply_patch', 'replace_lines', 'line_edit']);
 
 /** Consecutive text-only responses tolerated before ending the run gracefully. */
 const MAX_NO_TOOL_STREAK = 5;
@@ -87,16 +111,20 @@ const MAX_NO_TOOL_STREAK = 5;
  */
 const VERIFICATION_TOOLS = new Set(['run_test']);
 
-/** Matches a run_command ARGS JSON string whose command is a verification step. */
+/** Matches a run_command ARGS JSON string whose command is a verification step.
+ *  Covers test/typecheck/lint/build/diff --check AND real-world success probes
+ *  the agent actually uses to confirm a server/API works: curl against
+ *  localhost health/api-docs/swagger endpoints, listening-port checks
+ *  (lsof -iTCP / ss / netstat / nc -z) and wait-for-it. */
 const VERIFICATION_COMMAND_RE =
-  /\b(tsc|typecheck|lint)\b|--noEmit|\b(?:jest|vitest|pytest|mocha|rspec)\b|(?:^|[;&|(){}\[\]:,"\s]+)(?:pnpm|npm|yarn|bun|npx)\s+(?:exec\s+|run\s+)?(?:test|tests|lint|typecheck|build|check)(?:["'`,;{}|)\s]|$)|(?:^|[;&|(){}\[\]:,"\s]+)cargo\s+(?:test|check|build)(?:["'`,;{}|)\s]|$)|(?:^|[;&|(){}\[\]:,"\s]+)(?:go|python|python3)\s+(?:test\b|.*-m\s+test\b)|git\s+diff\s+--check|curl.{0,120}\b(?:health|ready)\b/i;
+  /\b(tsc|typecheck|lint)\b|--noEmit|\b(?:jest|vitest|pytest|mocha|rspec)\b|(?:^|[;&|(){}\[\]:,"\s]+)(?:pnpm|npm|yarn|bun|npx)\s+(?:exec\s+|run\s+)?(?:test|tests|lint|typecheck|build|check)(?:["'`,;{}|)\s]|$)|(?:^|[;&|(){}\[\]:,"\s]+)cargo\s+(?:test|check|build)(?:["'`,;{}|)\s]|$)|(?:^|[;&|(){}\[\]:,"\s]+)(?:go|python|python3)\s+(?:test\b|.*-m\s+test\b)|git\s+diff\s+--check|curl.{0,160}(?:health|ready|api-docs|swagger|\/api[^a-z]|localhost:\d+|127\.0\.0\.1:\d+)|lsof.{0,160}-iTCP|(?:^|[;&|{}\[\]:,"\s]+)(?:ss|netstat)\b|wait-for-it\b[^\n]{0,80}|nc\s+-z[^\n]{0,80}\d{3,5}/i;
 
 /**
  * Prose that reads like an explicit final report rather than mid-task narration.
  * Report-style bullet labels from the agent's own "Final response" section.
  */
 const FINAL_REPORT_RE =
-  /(^|\n)[ \t]*[-*•]?[ \t]*(Changed|Verified|Result|Summary|Done|Status)[ \t]*:|TASK (COMPLETE|COMPLETED)|completed successfully|verification (passed|green)|all checks (passed|green)/im;
+  /(^|\n)[ \t]*(?:[-*•][ \t]*)?[*_]*(Changed|Verified|Result|Summary|Done|Status)[*_]*[ \t]*:|TASK (COMPLETE|COMPLETED)|completed successfully|verification (passed|green)|all checks (passed|green)/im;
 
 /**
  * Prose that hands control back to the user instead of finishing the work
@@ -104,15 +132,12 @@ const FINAL_REPORT_RE =
  * turn is NOT a completion — smoke monkey must pick the reasonable default and
  * keep going; asking the user is reserved for ask_user and true blockers.
  */
-const USER_DEFER_RE =
-  /\b(let me know|which (one|option|approach)[^.\n]{0,60}prefer|do you want (me|us)|would you like (me|us)|should i\b|want me to|prefer that i|shall i\b|can you please|please (confirm|advise|tell me|let me know)|how (should|would|do) you (like|want) ?(me|us) to)\b|\?{1,3}[ \t]*$/im;
-
 /**
  * How many consecutive empty responses we tolerate BEFORE killing a run.
  * When the run has already produced tool work, tolerate far more — a provider
  * hiccup shouldn't throw away a productive build.
  */
-const MAX_EMPTY_RETRIES_WITH_PROGRESS = 10;
+const MAX_EMPTY_RETRIES_WITH_PROGRESS = 5;
 
 /**
  * When this many consecutive tool calls belong to SEARCH_FAMILY_TOOLS,
@@ -120,7 +145,7 @@ const MAX_EMPTY_RETRIES_WITH_PROGRESS = 10;
  * Catches varied args / alternating search tools that the exact-match
  * doom loop guard misses.
  */
-const SEARCH_FAMILY_LOOP_THRESHOLD = 10;
+const SEARCH_FAMILY_LOOP_THRESHOLD = 1000;
 
 /** Transient LLM/provider failures worth an automatic retry. */
 const MAX_LLM_RETRIES = 3;
@@ -128,19 +153,27 @@ const RETRYABLE_LLM_ERROR =
   /timeout|etimedout|econnreset|econnrefused|socket hang up|rate.?limit|too many requests|bad gateway|service unavailable|internal server error|overloaded|server error|\b5\d\d\b/i;
 
 /** Same tool + same args N times consecutively → doom loop. */
-const DOOM_LOOP_THRESHOLD = 10;
+const DOOM_LOOP_THRESHOLD = 1000;
+
+/**
+ * Consecutive verification commands (builds/tests/typecheck) that FAILED without
+ * any successful file mutation in between. At this count the agent is stuck on a
+ * failure it cannot fix (e.g. a broken frontend build it keeps re-running) — stop
+ * looping and finalize the run as failed rather than hammering it to MAX_STEPS.
+ */
+const MAX_CONSECUTIVE_FAILED_VERIFICATIONS = 5;
 
 /**
  * When a tool or command returns the byte-identical output this many times in a
  * row, the model is making no forward progress. Stop rather than spin forever.
  */
-const SAME_OUTPUT_THRESHOLD = 10;
+const SAME_OUTPUT_THRESHOLD = 101;
 
 /** Per-file mutation cap for the whole run. */
-const FILE_MUTATION_LIMIT = 20;
+const FILE_MUTATION_LIMIT = 200;
 
 /** Providers that stream deltas through parseStreamingResponse (text already emitted live). */
-const STREAMING_PROVIDERS = new Set(['openai', 'openrouter', 'nvidia', 'xai', 'gemini', 'opencode']);
+const STREAMING_PROVIDERS = new Set(['openai', 'openrouter', 'nvidia', 'xai', 'gemini', 'opencode', 'omniroute']);
 
 /** Per-turn guard bookkeeping shared by the tool executors. */
 interface RunGuards {
@@ -158,6 +191,35 @@ interface RunGuards {
   /** Tracks byte-identical tool outputs to detect a no-progress spin. */
   sameOutputStreak: number;
   lastOutputSignature: string;
+  /** Consecutive text-only turns that read like a FINAL report. Two in a row
+   *  with no tool work between → the run is done; stop the re-summarize loop. */
+  consecutiveFinalReports: number;
+  /** Consecutive verification commands (run_test/run_command) that FAILED with
+   *  no successful file mutation in between. When this climbs past a cap, the
+   *  agent is stuck on an unfixable failure — finalize instead of looping. */
+  consecutiveFailedVerifications: number;
+}
+
+/** Turn a user's opening prompt into a short, readable session title.
+ *  Strips code blocks / paths / markdown noise and caps at ~56 chars. */
+function deriveSessionTitle(message: string): string {
+  const dirty = message
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`]*`/g, ' ')
+    .replace(/\[[^\]]*\](\([^)]*\))?/g, ' ')
+    .replace(/[#*_>|~]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const clean = dirty.replace(/^[\s,.;:/\\\-·]+/, '').trim();
+  if (!clean) return '';
+  // Take the first sentence-ish chunk (~56 chars), folded at a word boundary.
+  let title = clean.slice(0, 56).replace(/\s+\S*$/, '');
+  if (!title) title = clean.slice(0, 56);
+  title = title.replace(/[.,;:!?]+$/, '').trim();
+  if (!title) return '';
+  if (!/[a-zA-Z0-9]/.test(title.charAt(0))) title = title.slice(1).trim();
+  if (!title) return '';
+  return title.charAt(0).toUpperCase() + title.slice(1);
 }
 
 @Injectable()
@@ -176,6 +238,8 @@ export class AgentService {
     @Inject(ToolRegistry) private readonly toolRegistry: ToolRegistry,
     private readonly workspaceIndex: WorkspaceIndex,
     private readonly apiKeyService: ApiKeysService,
+    private readonly secretsService: SecretsService,
+    private readonly mcpService: McpService,
   ) {}
 
   private readonly pendingAskUser = new Map<string, { resolve: (response: string) => void }>();
@@ -228,11 +292,18 @@ export class AgentService {
     await this.sessionService.updateStatus(sessionId, 'running');
 
     const run = await this.runService.create(sessionId, agentId || 'build', MAX_STEPS);
+    // Persist 'thinking' immediately — otherwise the runs list stays 'queued'
+    // for the entire run while the agent is actively thinking/executing.
+    await this.runService.updateStatus(run.id, 'thinking');
     this.activeSessionRuns.set(sessionId, run.id);
 
     this.eventEmitter.emitRunStarted(sessionId, run.id, agentId || 'build');
 
     await this.messageService.create(sessionId, 'user', message);
+
+    // Unnamed sessions get a title derived from the opening prompt — the
+    // running agent names the chat so the sidebar stops showing "New session".
+    void this.maybeAutoTitle(sessionId, message);
 
     this.executeAgentRun(sessionId, run.id, userId, message, workspacePath, agentId || 'build', model, provider, remoteProfileId).catch((err) => {
       this.logger.error(`Agent run failed: ${err.message}`);
@@ -242,6 +313,24 @@ export class AgentService {
     });
 
     return { status: 'started', sessionId };
+  }
+
+  /** Name the session from its first real user prompt (if still unnamed),
+   *  so chat history shows what the conversation is about. */
+  private async maybeAutoTitle(sessionId: string, message: string): Promise<void> {
+    try {
+      if (!message || !message.trim()) return;
+      const session = await this.sessionService.findOne(sessionId);
+      if (!session) return;
+      const current = (session.title || '').trim();
+      if (current && current !== 'New session') return;
+      const title = deriveSessionTitle(message);
+      if (!title) return;
+      await this.sessionService.updateTitle(sessionId, title);
+      this.logger.log(`Auto-titled session ${sessionId} → "${title}"`);
+    } catch (err) {
+      this.logger.debug(`Auto-title skipped for ${sessionId}: ${(err as Error).message}`);
+    }
   }
 
   async interrupt(sessionId: string): Promise<{ status: string }> {
@@ -320,6 +409,18 @@ export class AgentService {
     // Emit initial agent state for the UI timeline.
     this.eventEmitter.emitAgentState(sessionId, runId, 'understanding', 'active', phaseDirective('understand') ?? undefined);
 
+    // Emit the auto-opened sub-contexts so the UI immediately shows which
+    // domain guidance panels are open for this session (arrives AFTER the
+    // run.started reset, so it is never cleared). The agent then adjusts the
+    // set live via context_manage → context.updated events.
+    if (ctx.contextManager.activeCount > 0) {
+      const initial = ctx.contextManager.activeIds.map((id) => {
+        const c = getSubContext(id);
+        return { id, title: c?.title ?? id };
+      });
+      this.eventEmitter.emitContextUpdated(sessionId, runId, initial, ctx.contextManager.activeCount, ctx.contextManager.maxActive);
+    }
+
     const guards: RunGuards = {
       errorHistory: [],
       toolCallCounts: new Map(),
@@ -332,6 +433,8 @@ export class AgentService {
       emptyStreak: 0,
       sameOutputStreak: 0,
       lastOutputSignature: '',
+      consecutiveFinalReports: 0,
+      consecutiveFailedVerifications: 0,
     };
 
     try {
@@ -363,12 +466,39 @@ export class AgentService {
         // Tool groups: task classification ∪ current phase — exposure only grows,
         // so a model that needs an "out of phase" tool is never dead-ended.
         for (const toolName of PHASE_TOOLS[ctx.phase]) ctx.exposedTools.add(toolName);
-        const tools = this.toolRegistry.getDefinitions(ctx.exposedTools);
+        const registryTools = this.toolRegistry.getDefinitions(ctx.exposedTools);
+
+        // MCP tool defs: only tools from servers whose mcp_<id> context is active.
+        // Lazy-connect on first use so activation is fast.
+        const mcpTools: Array<{ name: string; description: string; parameters: Record<string, unknown> }> = [];
+        if (ctx.mcpRuntime) {
+          for (const cfg of ctx.mcpRuntime.configs) {
+            const mcpId = `mcp_${cfg.id}`;
+            if (!ctx.contextManager.isActive(mcpId)) continue;
+            try {
+              let handle = ctx.mcpRuntime.handles.get(cfg.id);
+              if (!handle) {
+              handle = await ctx.mcpRuntime.activateServer(cfg.id);
+            }
+            for (const t of handle.tools) {
+              mcpTools.push({
+                name: `${cfg.name}__${t.name}`,
+                description: `[MCP:${cfg.name}] ${t.description}`,
+                parameters: t.inputSchema,
+              });
+            }
+          } catch (err) {
+            this.logger.warn(`[MCP] failed to activate ${cfg.name}: ${err}`);
+            }
+          }
+        }
+        const tools = [...registryTools, ...mcpTools];
 
         let response: LLMResponse;
         try {
           this.eventEmitter.emitLlmThinking(sessionId, runId, step + 1);
           this.eventEmitter.emitAgentState(sessionId, runId, ctx.phase, 'active', 'Thinking…');
+          await this.runService.updateStatus(runId, 'thinking');
           response = await this.callLLMWithRetry(this.buildLLMMessages(ctx, extra), tools, provider, model, sessionId, runId, ctx.userId);
           this.logger.debug(`LLM response: content=${(response.content || '').slice(0, 100)} tool_calls=${response.tool_calls?.length || 0} finish=${response.finish_reason ?? '?'} usage=${JSON.stringify(response.usage)}`);
         } catch (err) {
@@ -394,10 +524,21 @@ export class AgentService {
           await this.sessionService.updateTokens(sessionId, response.usage.prompt_tokens, response.usage.completion_tokens, 0);
         }
 
-        // Parse inline text-format tool calls once (Qwen/GLM/DeepSeek house styles)
-        const inlineParsed = response.tool_calls?.length
+        // Parse inline text-format tool calls once (Qwen/GLM/DeepSeek house styles).
+        // When the message body is empty, also scan the reasoning/thinking text:
+        // local models routinely emit the tool call ONLY inside their reasoning
+        // block (empty content + empty tool_calls otherwise). Recovering it here
+        // turns a would-be "empty response" retry-loop into a real executed step.
+        let inlineParsed = response.tool_calls?.length
           ? { calls: [] as Array<{ id: string; function: { name: string; arguments: string } }>, cleaned: response.content || '' }
           : this.extractInlineToolCalls(response.content);
+        if (inlineParsed.calls.length === 0 && !response.tool_calls?.length && response.reasoning) {
+          const fromReasoning = this.extractInlineToolCalls(response.reasoning);
+          if (fromReasoning.calls.length > 0) {
+            inlineParsed = { ...fromReasoning, cleaned: response.content || '' };
+            this.logger.log(`Recovered ${fromReasoning.calls.length} tool call(s) from reasoning text (step ${step + 1})`);
+          }
+        }
 
         // Degeneration guard: the model is stuck re-printing the same block.
         if (!inlineParsed.calls.length && this.isDegenerateRepeat(response.content)) {
@@ -441,6 +582,8 @@ export class AgentService {
         // ── Tool execution turn ───────────────────────────────────────────
         if (calls.length > 0) {
           guards.noToolStreak = 0;
+          guards.consecutiveFinalReports = 0;
+          guards.emptyStreak = 0;
 
           // Emit executing state with tool names for the UI.
           const toolNames = calls.map((c) => c.function.name).join(', ');
@@ -453,16 +596,38 @@ export class AgentService {
             arguments: safeParseObject(tc.function.arguments),
             status: 'queued' as ToolCallJson['status'],
             ...((tc as LLMToolCall).thought_signature ? { thought_signature: (tc as LLMToolCall).thought_signature } : {}),
-          })));
+          })), undefined, response.reasoning);
 
           if (sourceIsStructured) {
             if (response.content && !STREAMING_PROVIDERS.has(provider || '')) {
               this.eventEmitter.emitTextDelta(sessionId, runId, assistantMsg.id, response.content);
             }
-            this.eventEmitter.emitTextEnd(sessionId, runId, assistantMsg.id, response.content || '', assistantMsg.toolCalls || undefined);
+            this.eventEmitter.emitTextEnd(sessionId, runId, assistantMsg.id, response.content || '', assistantMsg.toolCalls || undefined, response.reasoning);
           }
 
           await this.executeToolCalls(ctx, assistantMsg, calls, guards, { agentId, userId });
+
+          // finish_task — the model's explicit structural completion signal.
+          // Finalize immediately and break the loop regardless of prose style.
+          if (ctx.finishSignal) {
+            this.logger.log(`finish_task called — finalizing run ${runId} (${ctx.finishSignal.summary.slice(0, 80)})`);
+            await this.finalizeRunSuccess(ctx, sessionId, runId);
+            this.eventEmitter.emitStepEnded(sessionId, runId, step + 1);
+            return;
+          }
+
+          // Runaway build/verification loop: the agent kept re-running a failing
+          // check with no successful fix. Finalize as failed instead of looping.
+          if (ctx.hardStopReason) {
+            this.logger.warn(`Hard-stopping run ${runId}: ${ctx.hardStopReason}`);
+            await this.appendSystemNote(ctx, ctx.hardStopReason);
+            this.setPhase(ctx, 'complete');
+            await this.runService.updateStatus(runId, 'failed');
+            await this.sessionService.updateStatus(sessionId, 'failed');
+            this.eventEmitter.emitRunFailed(sessionId, runId, ctx.hardStopReason);
+            this.eventEmitter.emitStepEnded(sessionId, runId, step + 1);
+            return;
+          }
 
           const agentState = buildAgentState(ctx);
           await this.runService.saveAgentState(runId, agentState, ctx.workspacePath);
@@ -495,9 +660,16 @@ export class AgentService {
           // provider recovers instead of us hammering it in a tight loop.
           const emptyDelay = Math.min(6_000, 800 * 2 ** (guards.emptyStreak - 1));
           await new Promise((r) => setTimeout(r, emptyDelay));
-          await this.appendSystemNote(ctx,
-            'The model returned an empty response. Respond now. If you have completed the task, give your final summary. ' +
-            'Otherwise call a tool (read_file, edit_file, write_file, run_command) to keep making progress.');
+          // Nudge the model EXACTLY ONCE per empty streak. Re-appending a fresh
+          // "Respond now" system note on every retry bloats the context and makes
+          // small/local models loop on the same failure; a single standing nudge
+          // plus the backoff cooldown above is what actually gets the provider to
+          // recover.
+          if (guards.emptyStreak === 1) {
+            await this.appendSystemNote(ctx,
+              'The model returned an empty response. Respond now. If you have completed the task, give your final summary. ' +
+              'Otherwise call a tool (read_file, edit_file, write_file, run_command) to keep making progress.');
+          }
           continue;
         }
         guards.emptyStreak = 0;
@@ -506,11 +678,11 @@ export class AgentService {
         this.eventEmitter.emitStepEnded(sessionId, runId, step + 1);
 
         if (response.content) {
-          const assistantMsg = await this.appendAssistantMessage(ctx, response.content, undefined, response.usage);
+          const assistantMsg = await this.appendAssistantMessage(ctx, response.content, undefined, response.usage, response.reasoning);
           if (!STREAMING_PROVIDERS.has(provider || '')) {
             this.eventEmitter.emitTextDelta(sessionId, runId, assistantMsg.id, response.content);
           }
-          this.eventEmitter.emitTextEnd(sessionId, runId, assistantMsg.id, response.content);
+          this.eventEmitter.emitTextEnd(sessionId, runId, assistantMsg.id, response.content, undefined, response.reasoning);
         }
 
         // Completion is inferred from REAL evidence, never from "exploration +
@@ -525,50 +697,80 @@ export class AgentService {
         //   · the prose is NOT deferring back to the user.
         const content = (response.content || '').trim();
         const hasText = content.length > 20;
-        const deferredToUser = USER_DEFER_RE.test(content);
         const finalReport = FINAL_REPORT_RE.test(content);
         const verificationPassed = guards.recentToolResults.some(
           (r) => r.success && VERIFICATION_TOOLS.has(r.name),
         ) || guards.recentToolCalls.some(
           (tc) => tc.name === 'run_command' && VERIFICATION_COMMAND_RE.test(tc.args || ''),
         );
-        if (step > 2 && verificationPassed && finalReport && !deferredToUser) {
+        if (step > 2 && verificationPassed && finalReport) {
           this.logger.log(`Task completion detected at step ${step + 1} (verification + final report)`);
           await this.finalizeRunSuccess(ctx, sessionId, runId);
           return;
         }
 
-        // Deferral guard: if the agent tries to hand control back to the user
-        // ("which do you prefer?", "let me know how to proceed", a bare "?")
-        // instead of completing the requested work, keep the run alive and push
-        // it to pick the reasonable default and continue. This is the runaway
-        // cause of "agent stops early" — the model narrates progress, then asks
-        // instead of acting.
-        if (deferredToUser) {
-          guards.noToolStreak++;
-          if (step > 2 && step < MAX_STEPS - 1) {
-            if (guards.noToolStreak >= MAX_NO_TOOL_STREAK) {
-              this.logger.warn(`Agent kept deferring to the user (${guards.noToolStreak} turns) — finalizing run`);
-              await this.finalizeRunSuccess(ctx, sessionId, runId);
-              return;
-            }
-            await this.appendSystemNote(ctx,
-              'Do not ask the user to choose or confirm a next step. You are autonomous: pick the reasonable default, keep executing the ORIGINAL task to completion, and only pause if genuinely blocked on unavailable information. Continue with another tool call now.');
-            continue;
+        // Escape hatch for the re-summarize loop: a run that already produced
+        // tool work must not re-print the same final report forever just
+        // because its verification probe did not match the regex above. If the
+        // model delivers the SAME style of final report twice in a row with no
+        // tool call in between, the task is done — finalize instead of nudging.
+        if (!ctx.readOnlyQuery && finalReport) {
+          guards.consecutiveFinalReports++;
+          if (step > 2 && guards.consecutiveFinalReports >= 2 && guards.recentToolResults.length > 0) {
+            this.logger.log(
+              `Final report repeated ${guards.consecutiveFinalReports}x with no tool work at step ${step + 1} — finalizing`,
+            );
+            await this.finalizeRunSuccess(ctx, sessionId, runId);
+            return;
           }
+        } else {
+          guards.consecutiveFinalReports = 0;
+        }
+
+        // The model decides when the task is done: any substantial text-only
+        // final report ends the run and saves the chat — never re-feed the
+        // agent's own summary back into the loop.
+        if (finalReport && hasText) {
+          this.logger.log(`Agent finished with final report at step ${step + 1} — finalizing`);
+          await this.finalizeRunSuccess(ctx, sessionId, runId);
+          return;
         }
 
         // Read-only queries: the task is a question/analysis; a substantial
-        // answer grounded in exploration is the deliverable. An answer that
-        // defers back to the user is NOT an answer — it must resolve first.
+        // answer is the deliverable. We decide DYNAMICALLY based on whether the
+        // agent did any tool work, not on brittle heuristics like "does the
+        // reply end with a question mark".
         if (ctx.readOnlyQuery) {
           guards.noToolStreak++;
-          const answeredSubstantially =
-            hasText &&
-            content.length >= 60 &&
-            !deferredToUser &&
-            (guards.recentToolResults.length > 0 || guards.noToolStreak >= 2);
-          if (answeredSubstantially) {
+          const noToolWork = guards.recentToolResults.length === 0;
+
+          // PURE GENERAL CHAT — the agent used ZERO tools across the whole run.
+          // This is a greeting / casual conversation / non-code question, so
+          // there is no task in progress to "defer". Any text reply (no minimum
+          // length — even a short "Hello!" or "Sure.") IS the deliverable.
+          // Finalize on the FIRST reply regardless of length or trailing
+          // punctuation — greetings naturally end with "?" ("How can I help you
+          // today?"), and flagging that as a deferral is what made greetings
+          // loop instead of ending.
+          if (noToolWork) {
+            if (content) {
+              this.logger.log(`General chat answered at step ${step + 1} — finalizing`);
+              await this.finalizeRunSuccess(ctx, sessionId, runId);
+              return;
+            }
+            // Empty reply: keep looping a couple turns before giving up.
+            if (guards.noToolStreak >= MAX_NO_TOOL_STREAK) {
+              this.logger.log(`General chat produced no text (${guards.noToolStreak} turns) — finalizing`);
+              await this.finalizeRunSuccess(ctx, sessionId, runId);
+              return;
+            }
+            continue;
+          }
+
+          // READ-ONLY BUT EXPLORED — the agent read/searched the codebase to
+          // answer a real question. A substantial answer that resolves the
+          // question is the deliverable; let the agent end when it has answered.
+          if (hasText && (content.length >= 60 || guards.noToolStreak >= 2)) {
             this.logger.log(`Read-only query answered at step ${step + 1} — finalizing`);
             await this.finalizeRunSuccess(ctx, sessionId, runId);
             return;
@@ -585,25 +787,69 @@ export class AgentService {
         // Any other text-only turn is progress narration between tool calls.
         // A building agent often narrates as it works, so only end gracefully
         // when the model repeatedly refuses to use tools.
-        if (step > 2 && step < MAX_STEPS - 1) {
-          if (guards.noToolStreak >= MAX_NO_TOOL_STREAK) {
-            this.logger.warn(`No-tool streak hit ${guards.noToolStreak} at step ${step + 1} — finalizing run`);
-            await this.finalizeRunSuccess(ctx, sessionId, runId);
-            return;
-          }
-          await this.appendSystemNote(ctx,
-            'You must use tools to complete the task. Do not just describe what you would do — actually do it. Use read_file, edit_file, write_file, run_command, apply_patch, or other tools to make real changes. Continue with the next tool call now.');
-          continue;
-        }
+        // if (step > 2 && step < MAX_STEPS - 1) {
+        //   if (guards.noToolStreak >= MAX_NO_TOOL_STREAK) {
+        //     this.logger.warn(`No-tool streak hit ${guards.noToolStreak} at step ${step + 1} — finalizing run`);
+        //     await this.finalizeRunSuccess(ctx, sessionId, runId);
+        //     return;
+        //   }
+        //   await this.appendSystemNote(ctx,
+        //     'You must use tools to complete the task. Do not just describe what you would do — actually do it. Use read_file, edit_file, write_file, run_command, apply_patch, or other tools to make real changes. Continue with the next tool call now.');
+        //   continue;
+        // }
 
         await this.finalizeRunSuccess(ctx, sessionId, runId);
         return;
       }
 
       await this.finalizeRunSuccess(ctx, sessionId, runId);
+    } catch (err) {
+      // ABUSE-PROOF finalization: an unhandled throw mid-run (LLM hiccup, tool
+      // crash, DB write failure, shutdown during a long loop) must NEVER orphan
+      // the session in a perpetual 'running' state or leave the transcript
+      // dangling — that's what made chats vanish from the UI and the sidebar
+      // show a "stuck" session after a refresh. Always land the run in a
+      // terminal state and persist an honest final message, then rethrow so
+      // the caller can still log the failure.
+      await this.finalizeRunFailed(ctx, sessionId, runId, err);
+      throw err;
     } finally {
+      // Close all MCP server connections for this run
+      if (ctx?.mcpRuntime) {
+        try { ctx.mcpRuntime.closeAll(); } catch {}
+      }
       this.activeRuns.delete(sessionId);
       this.activeSessionRuns.delete(sessionId);
+    }
+  }
+
+  /**
+   * Terminal failure finalization: persists an explicit end-of-chat message (so
+   * the transcript is never left mid-stream / empty), marks the run and session
+   * as failed, and emits the run.failed event the UI listens for. Safe to call
+   * from a catch path — the session is always transitioned away from 'running'.
+   */
+  private async finalizeRunFailed(
+    ctx: RunContext,
+    sessionId: string,
+    runId: string,
+    err: unknown,
+  ): Promise<void> {
+    try {
+      this.setPhase(ctx, 'complete');
+      const reason = err instanceof Error ? err.message : String(err);
+      await this.appendAssistantMessage(
+        ctx,
+        `⚠️ The run stopped unexpectedly: ${reason}\n\nYour work so far is saved. You can reply below to continue.`,
+      );
+      await this.runService.updateStatus(runId, 'failed');
+      await this.sessionService.updateStatus(sessionId, 'failed');
+      this.eventEmitter.emitRunFailed(sessionId, runId, reason);
+    } catch (finalizeErr) {
+      this.logger.error(`Failed to finalize run as failed: ${finalizeErr}`);
+      // Last-resort: still pull the session out of 'running' so it is never
+      // left permanently live, even if the message/snapshot write failed.
+      try { await this.sessionService.updateStatus(sessionId, 'failed'); } catch { /* ignore */ }
     }
   }
 
@@ -638,7 +884,23 @@ export class AgentService {
     // re-assembled into the payload's single leading system message on every
     // LLM call, so there is exactly one authoritative system message and zero
     // mid-conversation system pollution.
-    const systemPrompt = await this.getSystemPrompt(args.agentId, args.workspacePath);
+    // Resolve the effective working directory ONCE: when the user names a
+    // specific sub-project under the workspace root, anchor the whole run's tool
+    // calls there (see resolveProjectDir). Passed to the system prompt (so the
+    // agent knows where commands/reads/writes land) and to the tool executor
+    // (so they actually run there).
+    const projectDir = resolveProjectDir(args.task, args.workspacePath);
+    const huggingFace = await this.secretsService
+      .getHuggingFaceStatus(args.userId)
+      .catch(() => ({ configured: false, status: 'invalid' as const, envName: 'HUGGING_FACE_TOKEN' }));
+
+    // MCP server configs (lightweight DB read, full runtime built later)
+    const mcpConfigs = await this.mcpService.listServers(args.userId)
+      .then(servers => servers.filter(s => s.enabled).map(s => ({ name: s.name, description: s.description })))
+      .catch(() => [] as Array<{ name: string; description: string }>);
+    const mcp = mcpConfigs.length > 0 ? { configured: true, servers: mcpConfigs } : undefined;
+
+    const systemPrompt = await this.getSystemPrompt(args.agentId, args.workspacePath, projectDir, { huggingFace, mcp });
 
     // Conversation: user/assistant/tool only. Persisted system rows (checkpoint
     // markers, historic notes) are replayed as ephemeral runtime instructions,
@@ -655,11 +917,47 @@ export class AgentService {
 
     const toolGroups = classifyTaskGroups(args.task, args.agentId);
 
+    // Sub-context feeder: the initial set (0-4) is auto-selected from the
+    // task so sub-contexts ALWAYS open and render on every run. The agent then
+    // adjusts it mid-run with context_manage as the task's context changes.
+    const recommendedContexts = recommendSubContextsForTask(args.task, toolGroups);
+    if (recommendedContexts.length > 0) {
+      this.logger.log(`Auto-opened sub-contexts for this run: ${recommendedContexts.join(', ')}`);
+    }
+    const contextManager = new SubContextManager(recommendedContexts);
+
+    // MCP runtime: load all enabled servers and register as dynamic sub-contexts
+    // the agent can activate/deactivate (max 3 at a time). Memory servers are
+    // auto-activated on every run so the agent always has persistent memory.
+    const mcpRuntime = await this.mcpService.buildRuntime(args.userId).catch((): undefined => undefined);
+    if (mcpRuntime) {
+      for (const cfg of mcpRuntime.configs) {
+        contextManager.registerMcpServer(
+          `mcp_${cfg.id}`,
+          cfg.name,
+          cfg.description || `MCP server: ${cfg.name}`,
+        );
+      }
+      for (const cfg of mcpRuntime.configs) {
+        const name = cfg.name.toLowerCase();
+        if (name === 'memory-mcp' || name.includes('memory') || name.includes('knowledge graph')) {
+          const opened = contextManager.activate(`mcp_${cfg.id}`);
+          if (opened.ok) {
+            this.logger.log(`MCP memory server auto-activated: ${cfg.name}`);
+          }
+        }
+      }
+      if (mcpRuntime.configs.length > 0) {
+        this.logger.log(`MCP servers registered: ${mcpRuntime.configs.map((c: { name: string }) => c.name).join(', ')}`);
+      }
+    }
+
     return {
       sessionId: args.sessionId,
       runId: args.runId,
       userId: args.userId,
       workspacePath: args.workspacePath,
+      projectDir,
       agentId: args.agentId,
       provider: args.provider,
       model: args.model,
@@ -669,6 +967,8 @@ export class AgentService {
       systemPrompt,
       runtimeInstructions,
       policyViolation: null,
+      hardStopReason: null,
+      finishSignal: null,
       snapshot: prevSnapshot,
       messages,
       filesRead: new Set(prevSnapshot.filesRead),
@@ -684,6 +984,8 @@ export class AgentService {
       phase: initialPhase(),
       lastToolCalls: [],
       lastCompactTokens: estimateTokens([{ role: 'system', content: systemPrompt }, ...messages]),
+      contextManager,
+      mcpRuntime,
     };
   }
 
@@ -755,11 +1057,13 @@ export class AgentService {
     content: string,
     toolCalls?: ToolCallJson[],
     usage?: { prompt_tokens: number; completion_tokens: number },
+    reasoning?: string | null,
   ): Promise<AgentMessage> {
     const msg = await this.messageService.create(ctx.sessionId, 'assistant', content, {
       toolCalls,
       tokensInput: usage?.prompt_tokens || 0,
       tokensOutput: usage?.completion_tokens || 0,
+      reasoning: reasoning || null,
     });
     ctx.messages.push({
       role: 'assistant',
@@ -815,7 +1119,14 @@ export class AgentService {
    * → ephemeral per-call directives. The conversation (user/assistant/tool)
    * follows untouched. No system message ever appears mid-conversation.
    */
-  private buildLLMMessages(ctx: RunContext, extra?: LLMMessage[]): LLMMessage[] {
+  /**
+   * Assembles the SINGLE authoritative system message content for each LLM
+   * call: base system prompt + snapshot summary + runtime policy + the live
+   * sub-context panel (active sub-contexts fed on demand by the model) + the
+   * most recent runtime instructions. Everything else is injected here, never
+   * appended as standalone system messages mid-conversation.
+   */
+  private buildSystemPromptContent(ctx: RunContext, extra?: LLMMessage[]): string {
     const sections: string[] = [ctx.systemPrompt];
 
     const snapMsg = snapshotToSystemMessage(ctx.snapshot);
@@ -824,6 +1135,10 @@ export class AgentService {
     const runtimePolicy = this.buildRuntimePolicy(ctx);
     if (runtimePolicy) sections.push(runtimePolicy);
 
+    // Context feeder: always surface the ACTIVE/AVAILABLE panel so the model
+    // sees its current sub-context state; active sub-context content is fed here.
+    sections.push(renderContextPanel(ctx.contextManager));
+
     const ephemeral: string[] = [];
     if (extra) for (const m of extra) if (m.content) ephemeral.push(m.content);
     // Only the most recent runtime guidance matters; stale notes are dropped
@@ -831,7 +1146,11 @@ export class AgentService {
     for (const note of ctx.runtimeInstructions.slice(-6)) ephemeral.push(note);
     if (ephemeral.length > 0) sections.push(ephemeral.join('\n'));
 
-    return [{ role: 'system', content: sections.join('\n\n') }, ...ctx.messages];
+    return sections.join('\n\n');
+  }
+
+  private buildLLMMessages(ctx: RunContext, extra?: LLMMessage[]): LLMMessage[] {
+    return [{ role: 'system', content: this.buildSystemPromptContent(ctx, extra) }, ...ctx.messages];
   }
 
   /**
@@ -939,11 +1258,7 @@ export class AgentService {
     ) {
       return true;
     }
-    // 2. Absolute per-tool cap.
-    if ((guards.toolCallCounts.get(toolName) || 0) + 1 >= MAX_SAME_TOOL_CALLS) {
-      return true;
-    }
-    // 3. Search-family flooding: too many search/list/read tools in a row
+    // 2. Search-family flooding: too many search/list/read tools in a row
     //    without any mutation or verification in between.
     if (SEARCH_FAMILY_TOOLS.has(toolName)) {
       if (guards.searchFamilyStreak + 1 >= SEARCH_FAMILY_LOOP_THRESHOLD) {
@@ -967,10 +1282,23 @@ export class AgentService {
     const toolName = toolCall.function.name;
     const toolCallId = toolCall.id;
 
+    // ── Deterministic phase advance from the OBSERVED intent. This MUST run
+    // BEFORE the ToolGate: a mutating call from explore/plan promotes the run
+    // to EDIT and grows exposure to the editing toolset, so the intent becomes
+    // execution instead of an impossible skip. Phase transitions are idempotent
+    // (edit→edit, verify→verify), so a call that is later sunk by the
+    // doom/search guards still leaves the run in the correct state.
+    this.setPhase(ctx, nextPhaseOnCall(ctx.phase, toolName));
+    for (const exposed of PHASE_TOOLS[ctx.phase]) ctx.exposedTools.add(exposed);
+
     // ── ToolGate: enforce the phase/task tool policy in CODE. The LLM never
     // gets an "out of policy" tool name past this point (e.g. an 8B local model
     // reaching for edit_file during a read-only/explore phase).
-    if (toolName !== 'ask_user' && !ctx.exposedTools.has(toolName)) {
+    // MCP tools (format: <serverName>__<toolName>) bypass the gate — their
+    // activation is controlled by the sub-context system.
+    const toolSep = toolName.indexOf('__');
+    const isMcpFormat = toolSep > 0 && ctx.mcpRuntime?.configs.some(c => c.name === toolName.slice(0, toolSep));
+    if (toolName !== 'ask_user' && !ctx.exposedTools.has(toolName) && !isMcpFormat) {
       const allowed = [...ctx.exposedTools].sort().join(', ');
       const skipMsg =
         `SKIPPED ${toolName}: not allowed in phase "${ctx.phase}". Allowed tools: ${allowed || 'none (finalize now)'}. ` +
@@ -995,9 +1323,13 @@ export class AgentService {
     }
 
     // Doom loop detection: same tool + same args N times consecutively.
+    // IMPORTANT: recentToolCalls must be retained long enough to test a full
+    // DOOM_LOOP_THRESHOLD window, otherwise the guard below can never trip
+    // (it used to be capped at 5 while the threshold was 10 — dead code that
+    // let a repeated failing command loop forever).
     const argsKey = JSON.stringify(toolArgs);
     guards.recentToolCalls.push({ name: toolName, args: argsKey });
-    if (guards.recentToolCalls.length > 5) guards.recentToolCalls.shift();
+    if (guards.recentToolCalls.length > DOOM_LOOP_THRESHOLD) guards.recentToolCalls.shift();
     if (
       guards.recentToolCalls.length >= DOOM_LOOP_THRESHOLD &&
       guards.recentToolCalls.slice(-DOOM_LOOP_THRESHOLD).every((tc) => tc.name === toolName && tc.args === argsKey)
@@ -1013,23 +1345,6 @@ export class AgentService {
       await this.appendToolResult(ctx, assistantMsg.id, toolCallId, skipMsg);
       await this.persistToolStatus(assistantMsg, toolCallId, 'failed', skipMsg);
       return;
-    }
-
-    if (count >= MAX_SAME_TOOL_CALLS) {
-      const otherTools = Array.from(guards.toolCallCounts.keys()).filter(
-        (t) => t !== toolName && (guards.toolCallCounts.get(t) || 0) > 0,
-      );
-      if (otherTools.length > 0) {
-        guards.toolCallCounts.set(toolName, 0);
-      } else {
-        const skipMsg = `SKIPPED ${toolName}: usage cap reached (${MAX_SAME_TOOL_CALLS} calls this run). Switch tools or finalize.`;
-        turnNotes.push(`Tool "${toolName}" called ${MAX_SAME_TOOL_CALLS} times consecutively. Try a different tool or approach.`);
-        this.eventEmitter.emitToolStarted(sessionId, runId, toolCallId, toolName, toolArgs);
-        this.eventEmitter.emitToolFailed(sessionId, runId, toolCallId, skipMsg);
-        await this.appendToolResult(ctx, assistantMsg.id, toolCallId, skipMsg);
-        await this.persistToolStatus(assistantMsg, toolCallId, 'failed', skipMsg);
-        return;
-      }
     }
 
     // Search-family loop: the model is stuck "looking for something" with
@@ -1048,16 +1363,26 @@ export class AgentService {
       return;
     }
 
-    // Deterministic phase advance from the OBSERVED action (skipped calls —
-    // doom loop / usage cap above — never reach this, so they don't count).
-    this.setPhase(ctx, nextPhaseOnCall(ctx.phase, toolName));
-
     this.eventEmitter.emitToolStarted(sessionId, runId, toolCallId, toolName, toolArgs);
 
     if (ctx.abortController.signal.aborted) {
       await this.appendToolResult(ctx, assistantMsg.id, toolCallId, `CANCELLED ${toolName}: the run was interrupted before execution.`);
       this.eventEmitter.emitToolFailed(sessionId, runId, toolCallId, 'Cancelled by user');
       await this.persistToolStatus(assistantMsg, toolCallId, 'failed', 'Cancelled by user');
+      return;
+    }
+
+    // finish_task — the model's STRUCTURAL completion signal. This sets the
+    // finish flag and stops the loop deterministically (no prose regex). The
+    // main loop reads ctx.finishSignal after the turn and finalizes.
+    if (toolName === 'finish_task') {
+      const summary = String(toolArgs.summary || '').trim() || 'Task complete';
+      ctx.finishSignal = { summary };
+      this.eventEmitter.emitToolOutput(sessionId, runId, toolCallId, summary);
+      this.eventEmitter.emitToolCompleted(sessionId, runId, toolCallId, { success: true, output: summary, metadata: {} });
+      await this.appendToolResult(ctx, assistantMsg.id, toolCallId, `[TASK COMPLETE] ${summary}`);
+      await this.persistToolStatus(assistantMsg, toolCallId, 'completed', summary);
+      guards.recentToolResults.push({ name: toolName, success: true, output: summary.slice(0, 200) });
       return;
     }
 
@@ -1091,7 +1416,22 @@ export class AgentService {
 
     const permission =
       precomputedPermission ?? (await this.permissionService.evaluate(toolName, '*', ids.agentId, ids.userId, ctx.workspacePath));
-    if (permission === 'deny') {
+    // Sensitive-file guard: reading/modifying secrets (env, keys, creds,
+    // tokens) always requires the user's explicit OK — even for agents whose
+    // rules otherwise auto-allow everything. This turns the resolved effect
+    // into an interactive 'ask' so the prompt appears in the chat, and a
+    // plain 'deny' blocks the call without touching the file.
+    const sensitive = this.sensitveTargetDetected(toolName, toolArgs, ctx.workspacePath);
+    const effectivePermission = sensitive && permission === 'allow' ? 'ask' : permission;
+    if (sensitive && permission === 'deny') {
+      const msg = `Blocked by security policy: accessing a sensitive file (secrets/credentials) requires permission.`;
+      this.eventEmitter.emitToolStarted(sessionId, runId, toolCallId, toolName, toolArgs);
+      this.eventEmitter.emitToolFailed(sessionId, runId, toolCallId, 'Permission denied (sensitive file)');
+      await this.appendToolResult(ctx, assistantMsg.id, toolCallId, msg);
+      await this.persistToolStatus(assistantMsg, toolCallId, 'failed', msg);
+      return;
+    }
+    if (effectivePermission === 'deny') {
       const denyMsg = `Tool "${toolName}" was denied by permissions.`;
       await this.appendToolResult(ctx, assistantMsg.id, toolCallId, denyMsg);
       this.eventEmitter.emitToolFailed(sessionId, runId, toolCallId, 'Permission denied');
@@ -1099,7 +1439,7 @@ export class AgentService {
       return;
     }
 
-    if (permission === 'ask') {
+    if (effectivePermission === 'ask') {
       this.eventEmitter.emitPermissionRequired(sessionId, runId, toolCallId, toolName, toolArgs);
       await this.runService.updateStatus(runId, 'waiting_permission');
       await this.sessionService.updateStatus(sessionId, 'waiting_permission');
@@ -1139,25 +1479,56 @@ export class AgentService {
     }
 
     const startedAt = Date.now();
-    const toolTimeout = AbortSignal.timeout(60_000);
+    const toolTimeout = AbortSignal.timeout(LONG_TOOL_NAMES.has(toolName) ? LONG_TOOL_TIMEOUT_MS : DEFAULT_TOOL_TIMEOUT_MS);
     const combinedSignal = ctx.abortController.signal.aborted
       ? ctx.abortController.signal
       : AbortSignal.any([ctx.abortController.signal, toolTimeout]);
-    const result = await this.toolRegistry.execute(toolName, toolArgs, {
-      workspaceDir: ctx.workspacePath,
-      workspacePath: ctx.workspacePath,
-      sessionId,
-      runId,
-      userId: ids.userId,
-      abortSignal: combinedSignal,
-      toolCallId,
-      workspaceIndex: this.workspaceIndex,
-      eventEmitter: this.eventEmitter,
-      remoteSsh: ctx.remoteProfileId ? { destinationId: ctx.remoteProfileId, userId: ids.userId } : undefined,
-    });
+
+    // MCP tool dispatch: route <serverName>__<toolName> to the MCP server.
+    const mcpSep = toolName.indexOf('__');
+    const mcpServerName = mcpSep > 0 ? toolName.slice(0, mcpSep) : null;
+    const isMcpTool = mcpServerName && ctx.mcpRuntime?.configs.some(c => c.name === mcpServerName);
+
+    let result: ToolResult;
+    if (isMcpTool && ctx.mcpRuntime) {
+      const cfg = ctx.mcpRuntime.configs.find(c => c.name === mcpServerName)!;
+      const mcpToolName = toolName.slice(mcpSep + 2);
+      try {
+        let handle = ctx.mcpRuntime.handles.get(cfg.id);
+        if (!handle) {
+          handle = await ctx.mcpRuntime.activateServer(cfg.id);
+        }
+        const mcpResult = await handle.callTool(mcpToolName, toolArgs);
+        const text = (mcpResult.content || []).filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n') || '(no output)';
+        result = {
+          success: !mcpResult.isError,
+          output: text,
+          isError: mcpResult.isError,
+          metadata: { mcpServer: cfg.name, mcpTool: mcpToolName },
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        result = { success: false, output: `MCP tool error: ${msg}`, isError: true };
+      }
+    } else {
+      // Registry tool dispatch
+      result = await this.toolRegistry.execute(toolName, toolArgs, {
+        workspaceDir: ctx.projectDir || ctx.workspacePath,
+        workspacePath: ctx.workspacePath,
+        sessionId,
+        runId,
+        userId: ids.userId,
+        abortSignal: combinedSignal,
+        toolCallId,
+        workspaceIndex: this.workspaceIndex,
+        eventEmitter: this.eventEmitter,
+        remoteSsh: ctx.remoteProfileId ? { destinationId: ctx.remoteProfileId, userId: ids.userId } : undefined,
+        contextManager: ctx.contextManager,
+      });
+    }
 
     try {
-      this.applyMutationBookkeeping(toolName, toolArgs, result, guards.fileMutationCounts);
+      this.applyMutationBookkeeping(toolName, toolArgs, result, guards.fileMutationCounts, guards);
 
       // Structured-result contract at the single choke point: duration stamping,
       // oversized-output spill to .smoke/runs/<runId>/ artifacts (works for every
@@ -1165,9 +1536,16 @@ export class AgentService {
       await enrichToolResult(toolName, result, { workspacePath: ctx.workspacePath, runId, startedAt });
 
       // Phase advance from the RESULT: verification failures demote VERIFY → RECOVER.
+      // A non-zero exit code is NOT an automatic failure for command-family tools —
+      // the tool contract renders it as an "[exit code: N]" marker that is DATA for the
+      // agent to interpret (grep/rg pipes legitimately exit 1 for "no match", which is
+      // often a clean pass). Only genuine tool-level errors (spawn failure, crash) or a
+      // timeout demote the run. The agent reads the marker and decides how to react.
+      const commandFamily = toolName === 'run_command' || toolName === 'run_test';
       const failed =
         result.isError === true ||
-        (typeof result.metadata?.exitCode === 'number' && result.metadata.exitCode !== 0);
+        result.metadata?.timedOut === true ||
+        (!commandFamily && typeof result.metadata?.exitCode === 'number' && result.metadata.exitCode !== 0);
       const prevPhase = ctx.phase;
       this.setPhase(ctx, nextPhaseOnResult(ctx.phase, toolName, failed));
       if (prevPhase === 'verify' && ctx.phase === 'recover') {
@@ -1198,12 +1576,16 @@ export class AgentService {
       // Ensure the frontend is never left with a tool stuck in 'running' state
       this.eventEmitter.emitToolFailed(sessionId, runId, toolCallId, `Tool execution failed: ${postErr}`);
       await this.persistToolStatus(assistantMsg, toolCallId, 'failed', `Tool execution failed: ${postErr}`);
+      // The failure reason MUST reach the LLM too — always feed the error
+      // back into the tool result the agent sees next.
+      result.isError = true;
+      result.output = `${result.output || ''}\n[TOOL RESULT PROCESSING ERROR: ${postErr}]`;
     }
 
     if (toolName === 'read_file' && result.metadata?.path) {
       ctx.filesRead.add(String(result.metadata.path));
     }
-    if (['write_file', 'apply_patch', 'delete_file', 'replace_lines'].includes(toolName) && result.metadata?.path) {
+    if (['write_file', 'apply_patch', 'delete_file', 'replace_lines', 'line_edit'].includes(toolName) && result.metadata?.path) {
       ctx.filesModified.add(String(result.metadata.path));
       // First mutation ⇒ verification tools become relevant from here on.
       for (const t of TOOL_GROUPS.verification) ctx.exposedTools.add(t);
@@ -1218,6 +1600,22 @@ export class AgentService {
     const isSuccess = !result.isError && (exitCode === undefined || exitCode === 0) && !result.metadata?.timedOut;
     guards.recentToolResults.push({ name: toolName, success: isSuccess, output: result.output.slice(0, 200) });
     if (guards.recentToolResults.length > 6) guards.recentToolResults.shift();
+
+    // Runaway-build guard: count consecutive FAILED verification commands
+    // (build/test/typecheck) with no successful edit between them. A build that
+    // keeps failing and that the agent cannot fix must terminate the run rather
+    // than being re-run to MAX_STEPS — this is the build-loop protection.
+    if (!isSuccess && (toolName === 'run_command' || toolName === 'run_test')) {
+      guards.consecutiveFailedVerifications++;
+      if (guards.consecutiveFailedVerifications >= MAX_CONSECUTIVE_FAILED_VERIFICATIONS) {
+        ctx.hardStopReason =
+          `Stopping: the ${toolName} command has failed ${guards.consecutiveFailedVerifications} times in a row ` +
+          `(${MAX_CONSECUTIVE_FAILED_VERIFICATIONS} consecutive verification failures) without a successful fix. ` +
+          `The run is finalizing as failed because it is stuck re-running a failing check. ` +
+          `Output below shows the latest failure.`;
+        this.logger.warn(`[run-hard-stop] ${ctx.hardStopReason} (run ${runId})`);
+      }
+    }
 
     // No-progress spin guard: the same tool returning the byte-identical output
     // many times means the model isn't moving forward. Nudge it to act instead.
@@ -1290,9 +1688,19 @@ export class AgentService {
   }
 
   private async finalizeInterrupted(sessionId: string, runId: string): Promise<void> {
-    await this.runService.updateStatus(runId, 'interrupted');
-    await this.sessionService.updateStatus(sessionId, 'interrupted');
-    this.eventEmitter.emitRunInterrupted(sessionId, runId, 'user_interrupt');
+    try {
+      // Persist an explicit end-of-chat marker so an interrupted session never
+      // re-opens as a dangling/empty transcript — the chat stays visible and
+      // restorable after a refresh.
+      await this.messageService.create(sessionId, 'assistant', '✋ Run interrupted by the user. Your work so far is saved — reply below to continue.');
+      await this.runService.updateStatus(runId, 'interrupted');
+      await this.sessionService.updateStatus(sessionId, 'interrupted');
+      this.eventEmitter.emitRunInterrupted(sessionId, runId, 'user_interrupt');
+    } catch (err) {
+      this.logger.warn(`finalizeInterrupted: ${err}`);
+      // Still pull the session out of 'running' so it is never left stuck live.
+      try { await this.sessionService.updateStatus(sessionId, 'interrupted'); } catch { /* ignore */ }
+    }
   }
 
   /** Advances the deterministic phase machine; emits phase.changed + agent.state events. */
@@ -1328,7 +1736,7 @@ export class AgentService {
    * runner strips it back out of the rewritten conversation.
    */
   private async maybeCompact(ctx: RunContext): Promise<void> {
-    const systemView: LLMMessage = { role: 'system', content: ctx.systemPrompt };
+    const systemView: LLMMessage = { role: 'system', content: this.buildSystemPromptContent(ctx) };
     const fullView: LLMMessage[] = [systemView, ...ctx.messages];
     const estBefore = estimateTokens(fullView);
     const overBudget = estBefore > ctx.tokenBudget * COMPACTION_THRESHOLD;
@@ -1354,15 +1762,6 @@ export class AgentService {
       await this.runService.updateStatus(ctx.runId, 'executing_tool');
     }
 
-    const estAfter = estimateTokens([systemView, ...ctx.messages]);
-    if (result) {
-      this.eventEmitter.emitCompactionCompleted(ctx.sessionId, ctx.runId, {
-        tokensBefore: estBefore,
-        tokensAfter: estAfter,
-        tokensSaved: result.tokensSaved,
-        messagesCompacted: Math.max(0, result.cutIndex - 1),
-      });
-    }
     ctx.lastCompactTokens = estBefore;
     if (!result) return;
 
@@ -1383,6 +1782,16 @@ export class AgentService {
     ctx.messages = result.kept.slice(1);
     ctx.lastCompactTokens = estimateTokens([systemView, ...ctx.messages]);
     ctx.observations.push(`Context compacted: saved ~${result.tokensSaved} tokens`);
+
+    // Compute tokensAfter with the rewritten context and emit the real values.
+    const realTokensAfter = estimateTokens([systemView, ...ctx.messages]);
+    this.eventEmitter.emitCompactionCompleted(ctx.sessionId, ctx.runId, {
+      tokensBefore: estBefore,
+      tokensAfter: realTokensAfter,
+      tokensSaved: estBefore - realTokensAfter,
+      messagesCompacted: Math.max(0, result.cutIndex - 1),
+      summary: result.summary,
+    });
 
     try {
       await this.sessionService.saveContextSnapshot(ctx.sessionId, snapshot as unknown as Record<string, unknown>);
@@ -1507,6 +1916,52 @@ export class AgentService {
     );
   }
 
+  /**
+   * Detects whether the given tool call targets a sensitive file (secrets,
+   * credentials, keys) that should always require explicit user permission:
+   * .env / .env.*, files named like credentials/secret/token/key, and
+   * well-known secret stores. Returns true for any tool that would read,
+   * write, list, or shell into such a path.
+   */
+  private sensitveTargetDetected(
+    toolName: string,
+    toolArgs: Record<string, unknown>,
+    workspacePath: string,
+  ): boolean {
+    const SENSITIVE_RE =
+      /(^|\/)(\.env|\.env\.\w+|credentials\.|secret|secrets?[^/]*\.|\.token|tokens?[^/]*\.|\.key|\.pem|\.pfx|id_rsa|id_ed25519|\.aws\/|credentials|api[_-]?key|passwords?\.json|\.npmrc|\.pypirc|\.netrc|config\.json.*(secret|token|key))/i;
+
+const collectTargets = (): string[] => {
+        const targets: string[] = [];
+        const walk = (args: Record<string, unknown>) => {
+          for (const [k, v] of Object.entries(args)) {
+            if (typeof v === 'string') targets.push(v);
+            else if (Array.isArray(v)) {
+              for (const item of v) {
+                if (typeof item === 'string') targets.push(item);
+                else if (item && typeof item === 'object') walk(item as Record<string, unknown>);
+              }
+            } else if (v && typeof v === 'object' && k === 'args') walk(v as Record<string, unknown>);
+          }
+        };
+        walk(toolArgs);
+        return targets;
+      };
+
+    // Only guard tools that can actually expose or mutate file contents.
+    if (!['read_file', 'list_directory', 'inspect', 'grep', 'edit_file', 'line_edit', 'write_file', 'replace_lines', 'apply_patch', 'delete_file', 'run_command', 'search_code'].includes(toolName)) {
+      return false;
+    }
+
+    for (const raw of collectTargets()) {
+      const t = String(raw);
+      // Resolve relative to workspace when possible so "backend/.env" matches.
+      const abs = t.startsWith('/') ? t : workspacePath ? `${workspacePath}/${t}`.replace(/\/+/g, '/') : t;
+      if (SENSITIVE_RE.test(t) || SENSITIVE_RE.test(abs)) return true;
+    }
+    return false;
+  }
+
 
   /**
    * Per-file mutation budget: blocks runaway "polish loops" where a weak model
@@ -1522,7 +1977,7 @@ export class AgentService {
     counts: Map<string, number>,
   ): Promise<boolean> {
     if (!AgentService.MUTATING_TOOLS.has(toolName)) return true;
-    const path = typeof toolArgs.path === 'string' ? toolArgs.path : '';
+    const path = AgentService.mutatingTargetPath(toolName, toolArgs);
     if (!path) return true;
     const used = counts.get(path) || 0;
     if (used < FILE_MUTATION_LIMIT) return true;
@@ -1542,9 +1997,13 @@ export class AgentService {
     toolArgs: Record<string, unknown>,
     result: { isError?: boolean; output?: string },
     counts: Map<string, number>,
+    guards?: RunGuards,
   ): void {
     if (result.isError || !result.output || !AgentService.MUTATING_TOOLS.has(toolName)) return;
-    const path = typeof toolArgs.path === 'string' ? toolArgs.path : '';
+    // A successful edit is real forward progress — reset the consecutive
+    // failed-verification counter so a legitimately-fixed build isn't punished.
+    if (guards) guards.consecutiveFailedVerifications = 0;
+    const path = AgentService.mutatingTargetPath(toolName, toolArgs);
     if (!path) return;
 
     const used = (counts.get(path) || 0) + 1;
@@ -1596,17 +2055,49 @@ export class AgentService {
     return parts.join('\n');
   }
 
-  private static readonly MUTATING_TOOLS = new Set(['write_file', 'edit_file', 'replace_lines', 'apply_patch']);
+  private static readonly MUTATING_TOOLS = new Set(['write_file', 'edit_file', 'line_edit', 'replace_lines', 'apply_patch']);
+
+  /** Resolves the first file a mutating tool targets. apply_patch has no `path`
+   *  arg — it carries target paths inside patchText — so extract the first
+   *  `+++ b/<path>` (or `--- a/<path>`) header for per-file budget bookkeeping. */
+  private static mutatingTargetPath(toolName: string, toolArgs: Record<string, unknown>): string {
+    if (toolName !== 'apply_patch') {
+      return typeof toolArgs.path === 'string' ? toolArgs.path : '';
+    }
+    const patch = typeof toolArgs.patchText === 'string' ? toolArgs.patchText : '';
+    if (!patch) return '';
+    const m = patch.match(/\+\+\+\s+(?:b\/)?(\S+)/);
+    if (m) return m[1].replace(/\t.*$/, '').trim();
+    const mOld = patch.match(/^---\s+(?:a\/)?(\S+)/m);
+    return mOld ? mOld[1].replace(/\t.*$/, '').trim() : '';
+  }
 
   private firstErrorLine(output: string): string {
     const line = output.split('\n').find((l) => l.trim().length > 0) || 'Tool failed';
     return line.slice(0, 200);
   }
 
-  private async getSystemPrompt(agentId: string, workspacePath?: string): Promise<string> {
+  private async getSystemPrompt(
+    agentId: string,
+    workspacePath?: string,
+    projectDir?: string,
+    opts?: {
+      huggingFace?: {
+        configured: boolean;
+        status: 'ok' | 'invalid';
+        envName: string;
+        tier?: 'free' | 'paid' | null;
+      };
+      mcp?: {
+        configured: boolean;
+        servers: Array<{ name: string; description: string }>;
+      };
+    },
+  ): Promise<string> {
     const env = `You are powered by an AI coding agent. Here is some useful information about the environment you are running in:
 <env>
   Workspace root: ${workspacePath || process.cwd()}
+  Working directory (every tool call DEFAULTS to this): ${projectDir || workspacePath || process.cwd()}
   Platform: darwin
   Today's date: ${new Date().toDateString()}
 </env>`;
@@ -1618,6 +2109,31 @@ export class AgentService {
 You are Smoke Monkey, an autonomous software-engineering agent operating through a tool harness.
 
 Your job is to COMPLETE the user's task, not to explain how the user could complete it.
+
+==================================================
+MANDATORY: FILE ASSET MENTIONS (PDF / PPT / IMAGES / ANY GENERATED FILE)
+==================================================
+
+Any file you CREATE that the user needs to see or download — a PDF, PPT/PPTX, Word
+document, image (PNG/JPG/JPEG/GIF/WEBP/SVG/AVIF), HTML export, CSV, or any other
+generated asset — MUST be announced in your chat response with the EXACT file-mention
+tag, on its own line:
+
+  <file-SM-st>/absolute/path/to/report.pdf<file-sm-ed>
+
+Rules (STRICT — a missed mention is a hard failure because the user then has NO way to
+see or download the file):
+· Wrap the ABSOLUTE path between the two tags verbatim: <file-SM-st>/Users/me/docs/report.pdf<file-sm-ed>.
+· Put ONE mention per generated file, in the same response where you describe finishing
+  that file. Do not rely on "see the file in the workspace" — the user does not browse
+  the workspace.
+· PDF/PPT/Word/archive assets render as downloadable file cards. Images (png/jpg/jpeg/
+  gif/webp/svg/avif) render as inlined previews the user can also download.
+· If you generated an image, still add the mention — the mention IS what renders it.
+· Never wrap the tag in a code fence or markdown link; emit it as plain text.
+
+Failure to emit the <file-SM-st>…<file-sm-ed> mention for any created asset means the
+file is INVISIBLE to the user. Treat it as a critical requirement, not a suggestion.
 
 ==================================================
 1. CORE RULE
@@ -1640,46 +2156,151 @@ Do not say something was changed unless a mutation tool actually changed it.
 Do not say something works unless you verified it.
 
 ==================================================
+1a. PARALLEL INSPECTION — BATCH READ-ONLY CALLS
+==================================================
+
+Inspection is parallel and batched as a FIRST-CLASS primitive, not an optional
+good behavior:
+
+- The inspect tool reads MANY files and lists MANY directories in ONE call.
+  When you need to see a directory tree AND key files, pass ALL the paths to
+  inspect at once (up to 12): inspect(...){paths:[...]} — it executes them all
+  concurrently and returns everything in one result. Prefer inspect for any
+  bulk orientation; use read_file only for deep/line-targeted reads.
+- If you emit separate read-only calls (list_directory, read_file, glob, grep,
+  find_symbol, search_code, git_diff) they run CONCURRENTLY in the background
+  too — so when you genuinely need >1 of them in one step, emit them TOGETHER
+  as MULTIPLE tool calls in ONE response instead of one-at-a-time. Each
+  round-trip is a network latency cost; batching makes inspection 2-5x faster.
+- Right after a list_directory, do NOT next-turn list/read each child one by
+  one. Batch the reads of the relevant files + the greps you already know you
+  need in a single turn of several tool calls (or one inspect call).
+- Keep batching reads/lists/greps until you understand the shape; a single turn
+  may contain 3-6 read-only tool calls.
+- Do NOT batch or parallelize anything that WRITES, runs the terminal, asks the
+  user, or depends on the result of another call — those stay sequential and
+  only ONE is issued per turn.
+- Only batch calls that are independent (their inputs do not depend on another
+  call's output).
+
+==================================================
+1b. GENERAL CHAT vs CODE TASK (DECIDE THE MODE)
+==================================================
+
+You are BOTH a friendly conversational assistant AND a coding/editing agent.
+Before acting, decide which mode this message needs:
+
+CASUAL / GENERAL CHAT — when the user is just talking to you, greeting you,
+making small talk, or asking a general question that has NOTHING to do with
+their codebase (e.g. "hi", "hello", "how are you", general advice, thanks,
+opinions, casual questions):
+- Answer directly, warmly, and in ONE short response.
+- DO NOT call any tools. DO NOT read, search, or inspect the project.
+- DO NOT open sub-contexts, do not plan, do not start a coding loop.
+- End immediately after your reply — one loop, done.
+- Reply EXACTLY ONCE. Do not repeat or echo your greeting, do not send a second
+  or third "hello" / "how can I help" variant, and do not ask an open-ended
+  follow-up question. Your single message is the entire answer, then you stop.
+  If you feel the urge to say another greeting, don't — you are already done.
+
+CODE / PROJECT TASK — when the message involves their project, code, files,
+build, tests, a feature, a bug, or anything about the workspace:
+- Then and only then explore the project, use todo_write for multi-step work,
+  and run the full verify-then-fix loop until complete.
+
+If you are unsure, default to a brief friendly reply and ASK what they want —
+do NOT start scanning the repository for a casual message.
+
+Rules:
+- NEVER run terminal commands, glob, grep, or read files just to answer a
+  greeting or a non-code general question.
+- A coding loop is for coding tasks only. Casual chat must not trigger the
+  tool loop.
+
+==================================================
+1c. PATH DISCIPLINE — STAY IN THE RIGHT PROJECT
+==================================================
+
+The workspace may hold SEVERAL projects in one folder. When the user names a
+specific project (by path or name) at the start of the task, that project IS
+your working directory for the whole run:
+
+- WORKING DIRECTORY: every tool call DEFAULTS to the user's named project
+  (shown at the top as "Working directory"). run_command, read_file, write_file,
+  edit_file, grep, glob and search all anchor there for this run.
+- PASS WORKDIR EXPLICITLY: if a command must run inside a subfolder of the named
+  project, pass workdir with a path RELATIVE TO the working directory (e.g.
+  workdir:"backend"), never an ambiguous absolute path and never the parent root.
+- RELATIVE PATHS: prefer relative paths so they resolve against the working
+  directory, not the multi-project root.
+- STAY CONSISTENT: once you pick the project, keep using the SAME project path for
+  every subsequent read/write/run in this task. Do NOT drift back to the parent
+  folder or switch to a sibling project unless the user asks.
+- HOLD THE CONTEXT: the working directory persists for the entire run. Never
+  "reset" to the root between steps.
+- If the user did NOT name a project, default to the workspace root.
+- Before acting, if the exact target directory is ever unclear, confirm it quickly
+  (e.g. run_command "pwd && ls") rather than guessing and hitting the wrong project.
+
+==================================================
 2. TOOL PRIORITY
 ==================================================
 
 Use the cheapest tool that can answer the question.
 
+0. todo_write (BEFORE multipart work)
+   → plan the task: write the step list as soon as you understand what a
+     multi-step task requires, and keep it updated as you go (see Section 24).
+
 1. WorkspaceIndex / find_symbol
-   → locate symbols, definitions, references.
+   → locate symbols, definitions, references. PREFERRED over grep for any
+     symbol/identifier lookup — it resolves via a local SQLite index in ~1ms
+     instead of a full-tree scan. Call find_symbol ({name}) or search_code
+     ({query: "ExactIdentifier"}) FIRST; only fall back to rg/grep for
+     fuzzy or regex text search that symbol lookup cannot answer.
 
 2. rg / fd
-   → search text and locate files.
+   → search text and locate files (use for fuzzy/regex content search).
 
-3. read_file
-   → inspect the exact relevant code.
+3. inspect
+   → read MANY files + list MANY directories in ONE concurrent call. Best
+     default for orientation (directory trees + their key files together).
 
-4. run_command
+4. read_file
+   → inspect the exact relevant code (deep/line-targeted reads).
+
+5. run_command
    → terminal investigation, scripts, tests, builds,
      git, logs, processes, HTTP/API checks.
 
-5. replace_lines
+ 6. line_edit
+   → apply MULTIPLE line-keyed edits in ONE call: pass
+     {"<lineNumber>": "code"} for any existing or new lines.
+     Most token-efficient targeted editor. Use when you know
+     the exact lines to change across a file.
+
+ 6. replace_lines
    → fast, token-efficient existing-file edit using read_file
      line numbers (startLine..endLine + replacement text).
-     Prefer over edit_file whenever you know the lines.
+     Use for a contiguous range; line_edit for scattered lines.
 
-6. edit_file
+ 7. edit_file
    → focused existing-file modification when you don't have
      exact line numbers.
 
-7. apply_patch
+ 8. apply_patch
    → multiple related edits in one atomic change.
 
-8. write_file
+ 9. write_file
    → create a new file.
 
-9. git diff
+ 10. git diff
    → inspect the actual change.
 
-10. tests / typecheck / build
+ 11. tests / typecheck / build
     → verify correctness.
 
-11. run app + curl + logs
+ 12. run app + curl + logs
     → prove runtime behavior when required.
 
 Do NOT use a more expensive operation when a cheaper one is sufficient.
@@ -1745,8 +2366,8 @@ Example: start and verify an application:
 run_command(
   "pnpm dev > /tmp/app.log 2>&1 & " +
   "sleep 3 && " +
-  "lsof -nP -iTCP:3000 -sTCP:LISTEN && " +
-  "curl -fsS http://localhost:3000/health && " +
+  "lsof -nP -iTCP:... -sTCP:LISTEN && " +
+  "curl -fsS http://.../health && " +
   "tail -n 50 /tmp/app.log"
 )
 
@@ -1823,6 +2444,22 @@ Package / build / test:
   pnpm build / next build / vite build
   pnpm lint / pnpm typecheck
 
+Package manager install errors — READ THE OFFSET AND FIX THE FILE:
+  If pnpm i / npm i / yarn fails with
+  ERR_PNPM_JSON_PARSE, EJSONPARSE, Unexpected non-whitespace character after JSON,
+  Unexpected token at position N, or the path of a package.json — the target package.json
+  is corrupt JSON. Do NOT retry blindly. Do NOT probe far. First action:
+    1. read_file the failing package.json (the error names it, e.g. backend/package.json).
+    2. Read it EXACTLY. A corrupt file usually has ONE missing brace/bracket/quote or a
+       broken "scripts" block (e.g. "scripts": { ... } with fields spilled outside the
+       braces and a stray closing brace, or dev assigned at the top level). Position N
+       points at the first wrong character (column ~= byte offset from the opening brace).
+    3. Fix ONLY the syntax. Preserve every key and its value; do not reformat or reword.
+       Restore the proper nested shape: { "scripts": { "dev": "...", ... }, ... }.
+    4. Confirm it parses with:  jq empty <file>   (or a JSON.parse call in node),
+       then re-run the original install.
+
+
 Processes / ports / HTTP — vital for runtime verification:
   lsof -nP -iTCP:<port> -sTCP:LISTEN   # who owns a port (use before killing)
   lsof -nP -iTCP:<port>                # all conns on a port
@@ -1834,8 +2471,11 @@ Processes / ports / HTTP — vital for runtime verification:
   pkill -f "<pattern>"                # only for YOUR stray processes
 
 Timeouts (smart, so nothing hangs):
-  - Every command is auto-killed at its timeout. Pass an explicit
-    timeout= for slow work: builds, installs, big tests -> timeout=300000+.
+  - Every command is auto-killed at its timeout. The DEFAULT is 3 minutes (180 seconds).
+  - ALWAYS pass an explicit timeout= appropriate to the work: quick checks can
+    use the default; slow work (builds, installs, watch/test suites, large
+    migrations) -> timeout=300000/600000 as needed. Not setting one
+    means the command is hard-capped at the 180s default and will be killed.
   - Leave a Server/watcher running by using background=true; never block
     the run on one.
   - If a command is slow but safe, extend its timeout rather than sending
@@ -1852,6 +2492,20 @@ PROCESS-SAFETY (important):
        kill <that-pid>
   - Reserve kill -9 (SIGKILL) for processes that ignore SIGTERM — never
     as a first choice, and never on the api-gateway or a database.
+
+HANG PREVENTION (critical — violates = terminal hangs forever):
+  - NEVER combine a backgrounded server with foreground work in ONE call:
+      BAD:  "nodemon src/index.js & sleep 2 && tail -30 /tmp/log"
+      GOOD: Call 1: run_command("nodemon src/index.js", background=true)
+            Call 2: run_command("sleep 2 && tail -30 /tmp/log")
+  - The '&' operator backgrounds the process but the shell keeps its pipe fds
+    open — the shell never exits, the timeout fires but can't kill it, and
+    the next command never runs.
+  - Long-running servers (nodemon, pm2, vite dev, next dev, pnpm dev, etc.)
+    MUST use background=true on a standalone call. The tool will reject them
+    if submitted without background=true.
+  - If you need to verify a server started, use a SEPARATE follow-up call:
+      run_command("sleep 2 && curl -fsS http://localhost:..../health")
 
 ==================================================
 5. SEARCH → READ → EDIT
@@ -1902,10 +2556,20 @@ Before editing existing code:
 
 Choose the right edit tool for efficiency:
 
+line_edit
+→ PREFERRED for multiple targeted edits in one call: pass
+  {"<lineNumber>": "code"} for each line (from read_file). Lines
+  past the end create new lines; empty string deletes a line.
+  All at once, cheaply. Great for scattered changes in one file.
+  IMPORTANT: line_edit is a FUNCTION TOOL — call it directly, never
+  as a shell/run_command command. Each edits VALUE is the BARE line
+  content exactly as it should appear on disk: no JSON wrapping, no
+  commas/braces/punctuation beyond the code itself, keep indentation.
+
 replace_lines
-→ PREFERRED for existing-file edits when you know the lines
-  (from read_file): pass path + startLine..endLine + replacement.
-  Fast and token-efficient. Use it for a single targeted hunk.
+→ PREFERRED for a single contiguous existing-file hunk when you
+  know the lines (from read_file): pass path + startLine..endLine
+  + replacement. Fast and token-efficient.
 
 edit_file
 → one focused change (use when you're unsure of exact line numbers,
@@ -1934,50 +2598,40 @@ NEVER:
 - rewrite a whole file to change a single line;
 - leave behind debug logs or commented-out dead code after the edit.
 
+TOOL CALL FAILED — REACT AND RETRY (non-negotiable):
+
+Every tool call returns a result. When a call FAILS (edit_file/apply_patch
+reports "oldString not found", "hunk did not match", a path error, a 404,
+a crash, a "BLOCKED" guard, etc.), the failure is always fed back to you as
+the tool result — READ IT. The failure reason is the input to your next
+action, never the end of the task:
+
+1. Diagnose the real cause from the error text (oldString mismatch → the file
+   content differs from what you assumed; patch hunk drift → line numbers
+   shifted; permission/path error → different target).
+2. Fix the cause, not the symptom: for edit_file/apply_patch/replace_lines
+   failures, read_file the target region FIRST to get the exact current text
+   or line numbers, then retry with corrected arguments.
+3. Retry the intended change with the corrected call. A failed tool call is
+   NOT a reason to stop — keep going until it succeeds or you have rock-solid
+   evidence the change is impossible.
+4. Only finalize when your requested change is confirmed applied and verified
+   (or genuinely blocked by a hard guard you have already tried to maneuver
+   around — never write a summary about a change you did not actually make).
+
 ==================================================
 7. BUILD EXCELLENT UI
 ==================================================
 
-You are expected to produce polished, production-quality interfaces —
-not just "working" ones. Match the project's existing stack and look:
-follow the framework (Next.js/React/Vite), CSS approach (Tailwind,
-CSS modules, or plain CSS), and component library (shadcn/ui, MUI,
-Chakra, or hand-rolled) already in use. Match existing spacing,
-colors, radii, typography, and motion so the new UI looks native to
-the app rather than bolted on.
-
-COMPONENT RECIPE (when the project uses shadcn/ui + Tailwind):
-- Prefer reusing existing shadcn components and tokens; install missing
-  ones with the CLI (e.g. CI=true npx --yes shadcn@latest add dialog -y)
-  rather than hand-writing equivalents.
-- Compose small, single-responsibility components with clear props;
-  avoid one giant file with hundreds of lines.
-- Use semantic HTML and the platform's built-in controls where possible.
-
-LAYOUT & RESPONSIVENESS:
-- Think mobile-first; make layouts collapse gracefully with a sensible
-  minimum usable width. No horizontal scrolling on common viewports.
-- Use a fluid layout (flexbox/grid) instead of hard-coded pixel widths.
-- Respect safe areas and overflow for long content (wrap/truncate).
-
-VISUAL POLISH:
-- Consistent spacing scale, defined color roles (background / surface /
-  primary / accent / muted), and a readable hierarchy of type.
-- Rounded corners, subtle borders/shadows, deliberate hover/active/
-  focus states. Smooth, purposeful transitions (never janky or random).
-- Dark mode support if the app supports it — use tokens, not hard-coded
-  colors, so both themes stay coherent.
-- Loading, empty, and error states: skeletons/spinners, meaningful empty
-  copy, and friendly error handling — never a raw crash or blank box.
-- Accessibility: keyboard-navigable, focus-visible outlines, sufficient
-  contrast, aria-labels on icon-only controls, and a logical DOM order.
-
-VERIFY YOUR UI:
-- After building, run the typecheck/build and, if feasible, check the
-  rendered page (dev server + curl, or a screenshot if a browser tool is
-  available). Confirm interactions, overflow, and the empty state.
-- If you made visual changes, re-read the CSS/component to confirm the
-  classes and tokens you referenced actually exist.
+You are expected to produce polished, production-quality interfaces — not
+just "working" ones. The full UI recipe (match the project's stack and look,
+shadcn component recipe, mobile-first responsive layout, visual polish /
+dark mode / loading-empty-error states, accessibility, verify-your-UI) is
+loaded from the sub-context "frontend_ui" on demand:
+context_manage(action="activate", contextId="frontend_ui").
+ACTIVATE IT for any task that builds or changes frontend/UI code — then
+deactivate it when the UI work is done. Core rule right here: new UI must
+look native to the app, not bolted on.
 
 ==================================================
 8. CODE UNDERSTANDING & MAINTENANCE
@@ -2086,6 +2740,7 @@ build
 → endpoint
 → inspect response
 → inspect logs
+→ if the process started but port is not bound, read package.json "scripts"/"main" and the entry file — it may export the app without calling listen(); fix the entry or the script, do not keep probing an unbound port
 
 FRONTEND:
 build
@@ -2106,6 +2761,40 @@ Do not stop immediately after a successful edit.
 Do not tell the user to manually verify something that the agent can verify itself.
 
 ==================================================
+11b. RUNTIME VERIFY-THEN-FIX LOOP (DO THIS, DO NOT SKIP)
+==================================================
+
+After you make changes, your work is NOT done until the project actually runs
+and the real errors are gone. Simply running a build once is not enough. Follow
+this loop for application/server/frontend tasks:
+
+1. START THE PROJECT
+   run_command(command="<start script>", background=true) — use the project's
+   own dev/start script (read package.json "scripts" first). Prefer the dev
+   server if present (it surfaces TS/build errors live), else the start script.
+
+2. CHECK THE LOGS + ERRORS
+   run: sleep 2-4 && tail -n 60 <log>  (or read the streamed output) and read what
+   actually happened. Look for: TypeScript/compile errors, missing modules,
+   port-not-bound, HTTP failures, runtime exceptions, build-time lint errors.
+
+3. DIAGNOSE + FIX
+   For each real error, find the offending file and root cause, read it, and
+   patch it (fix the TS/lint/import/port issue properly — do NOT paper over it).
+
+4. RE-RUN / RE-VERIFY
+   Re-start the project (or re-run the check) and confirm the error is gone:
+   health endpoint responds, or the port is bound, or the dev server compiles
+   with no errors, and tests/typecheck pass.
+
+5. ONLY THEN finish.
+
+Hard rule: if a TypeScript error, compile error, runtime error, or failing
+check exists, you must FIX it (not just report it) — then re-run until it is
+green. Do not stop after editing while the app would still crash or fail to
+compile. A stopped/crashing app with errors is an unfinished task.
+
+==================================================
 12. USE WORKSPACE INTELLIGENCE
 ==================================================
 
@@ -2118,10 +2807,10 @@ Need references?
 → find references / rg
 
 Need text?
-→ rg
+→ rg (or grep -rnE if rg is not installed)
 
 Need a file?
-→ fd
+→ fd (or find if fd is not installed)
 
 Need exact implementation?
 → read_file
@@ -2325,9 +3014,12 @@ NEEDED:
 19. FINAL RESPONSE
 ==================================================
 
-Keep the final response short.
+To END the run once your task is genuinely complete and verified, call the
+finish_task tool with a short summary of what you did. This is the
+authoritative, structural way to finish — it stops the loop immediately.
 
-Use:
+In the SAME turn as finish_task, also include your final report as plain text
+(the UI shows it). Keep it short. Use:
 
 Changed:
 - ...
@@ -2338,7 +3030,12 @@ Verified:
 Result:
 - ...
 
-Do not include unnecessary narration.
+Rules:
+- Call finish_task exactly ONCE, at the end, when the work is truly done.
+- Do NOT keep talking, re-summarize the same results, or emit more tool calls
+  after calling it.
+- Do NOT call finish_task for casual/general chat — just reply in text.
+- Never write a summary about a change you did not actually make and verify.
 
 ==================================================
 20. PR / CHANGE SUMMARY
@@ -2365,173 +3062,206 @@ Write like a pull request description.
 21. USEFUL LIBRARIES & RESOURCES
 ==================================================
 
-Prefer battle-tested, widely-adopted libraries over inventing your own.
-Check what the project already uses first, and add a dependency only when
-it clearly beats working with what's installed. For each domain, turn to:
-
-GENERAL UTILITIES
-- zod / valibot — schema validation & TypeScript-safe parsing (pick what the
-  project uses; standardize request/dto parsing on it).
-- lodash-es / radash — functional helpers (prefer native JS where readable).
-- clsx + tailwind-merge — conditional classnames in React/Tailwind.
-- chrono-node / dayjs / date-fns — datetime parsing & formatting.
-- ulid / uuid / nanoid — identifier generation.
-- neverthrow / @effect/io — explicit Result/error-typed flows where useful.
-
-BACKEND / NODE
-- Fastify or Express (pick what's installed), nestjs-style DI if present.
-- Prisma / Drizzle / TypeORM / Kysely — SQL access; prefer the project's ORM.
-- pg / mysql2 drivers + a pool (pg.Pool) over ad-hoc connections.
-- Redis (ioredis) for caching/queues/locks; BullMQ or Redis-queue for jobs.
-- Zod + DTO patterns on every API boundary.
-
-MICROSERVICES / MESSAGING / STREAMING
-- gRPC: protobuf + @grpc/grpc-js; define contracts in .proto, generate stubs.
-- NATS (nats.js) — lightweight pub/sub, request-reply, jetstream for durable queues.
-- Kafka (kafkajs / librdkafka) — high-throughput event streams, log compaction,
-  consumer groups. Use for events, CDC, analytics pipelines.
-- RabbitMQ (amqplib) — classic AMQP queues, routing keys, work queues.
-- Event-sourcing & outbox pattern for reliable cross-service events.
-
-FRONTEND / UI
-- React/Next.js, shadcn/ui + Radix primitives (Dialog, Popover, Tooltip, Select...),
-  Tailwind CSS, framer-motion for animation, TanStack Query for server state,
-  Zustand / React Context for client state, react-hook-form + zod for forms.
-- Charts: recharts / echarts. Tables: TanStack Table. Icons: lucide-react.
-- Virtualization for long lists: @tanstack/react-virtual.
-
-TESTING
-- vitest / jest — unit tests; @testing-library/react — component tests;
-  Playwright / Cypress — E2E. Use the framework already in the project.
-
-QUALITY TOOLS (when configured)
-- ESLint/Prettier for lint & format; Biome as a fast all-in-one alternative.
-- Husky + lint-staged pre-commit hooks.
-- Sentry / OpenTelemetry for errors and traces; Morgan/pino for logs.
-
-When you pick a resource, verify it's actually installed (lockfile/node_modules)
-before relying on it, and use the project's versions — don't introduce a
-conflicting major version.
+The full per-domain library catalog (general utilities, backend, microservices/
+messaging, frontend, testing, quality) lives in the sub-context "library_guide"
+— it is fed into context ONLY when you actually need it:
+context_manage(action="activate", contextId="library_guide").
+Activate it when picking libraries or adding a dependency, then deactivate it
+when that decision is made. Core rule right here: prefer battle-tested
+libraries already proven in this project over inventing your own, and verify a
+library is actually installed before you rely on it.
 
 ==================================================
 22. BACKEND SCALE & MICROSERVICES
 ==================================================
 
-When building or extending backend systems, design for scale and clear
-service boundaries from the start — even if today's system is small.
-
-MICROSERVICE SHAPE:
-- Split by domain/ownership boundary (auth, users, billing, orders), NOT by
-  stack layer. Each service owns its data; services talk over explicit
-  contracts (REST/OpenAPI, gRPC .proto, or async events), never by reaching
-  into another service's database.
-- Keep services stateless for horizontal scaling; push state to the DB,
-  cache, or message broker. Use a gateway/BFF for cross-cutting concerns
-  (auth, rate limiting, routing, aggregation).
-- First-class API contracts: versioned, typed, validated (zod on the edges),
-  with idempotency keys on write endpoints and proper pagination (cursor >
-  page number for large data).
-
-INTER-SERVICE COMMUNICATION:
-- gRPC is ideal for low-latency request/reply with strong contracts:
-  define messages & services in .proto, generate typed stubs, use
-  deadlines/timeouts and retry policies, TLS/mTLS where possible.
-- REST with OpenAPI for external/loose-coupled interfaces and gateways.
-- Event-driven messaging for anything that decouples producers from consumers:
-  NATS for fast pub/sub + request-reply + jetstream durability, Kafka for
-  high-throughput streams/CDC/analytics with consumer groups and replay.
-- Use an outbox pattern (write the event to the DB in the same transaction)
-  to guarantee at-least-once delivery without dual-write problems; consumers
-  must be idempotent.
-
-QUEUES / JOBS / BACKGROUND:
-- Push slow, retryable work into a queue (BullMQ/Redis, NATS JetStream, or
-  RabbitMQ): emails, notifications, reports, index rebuilds, AI calls.
-- Prefer workers = separate processes/machines; make jobs idempotent and
-  resumable (checkpoint progress), with retries + exponential backoff and a
-  DLQ (dead-letter queue) for poison messages.
-
-RESILIENCE PATTERNS:
-- Timeouts, retries with jitter, circuit breakers, bulkheads (separate
-  thread/conn pools per dependency), graceful degradation, and rate limiting.
-- Caches with TTL + invalidation strategy; distributed locks (Redis) for
-  critical sections; request deduplication where beneficial.
-- Observability everywhere: structured logs, metrics, traces (OpenTelemetry).
-
-Apply these patterns pragmatically — a monolith with clean module boundaries
-and an outbox is often the right first step; extract services as pain points
-justify it. Don't over-engineer a tiny system with ten microservices.
+Deep guidance for microservices, gRPC, NATS, Kafka, message queues, the outbox
+pattern, job workers, and resilience/observability is loaded from the
+sub-context "backend_scale" on demand: context_manage(action="activate",
+contextId="backend_scale"). ACTIVATE IT when the task touches backend/server/
+API work, services, queues, streaming, or deployments — and deactivate it when
+that work is done. Core rules right here: design for scale with clean service
+boundaries from the start; never reach into another service's database; make
+consumers idempotent.
 
 ==================================================
 23. EDGE CASES
 ==================================================
 
-Think about the boundaries — production code lives or dies by them.
-
-DATA & INPUT:
-- Empty strings, whitespace, null/undefined, negative numbers, huge numbers,
-  NaN, Infinity, 0/falsy values, very long strings, and invalid encodings.
-- Malformed/unexpected JSON, missing fields, extra fields, wrong types,
-  unexpected enums/status values, and locale differences (dates, numbers,
-  timezones, unicode).
-- Duplicate submits, duplicate rows/keys, concurrency (two writes at once),
-  and idempotency: a repeated request must not double-add or double-charge.
-- Referential states: items that no longer exist, parent deleted before child,
-  partially-finished multi-file operations, and empty collections.
-
-NETWORK & RESOURCES:
-- Timeouts, connection resets, DNS failures, 429/5xx, partial responses,
-  and stream errors mid-read. Cancellation (user navigated away / client
-  disconnected) must not crash or leak.
-- Rate limits, token expiry/refresh, expiring sessions, and missing/invalid
-  credentials. File size limits, disk-full, permission denied, missing dirs.
-- Ports already in use, processes already running, and last-resort reads on
-  files that were moved/deleted between read and write.
-
-APPLICATION BOUNDARIES:
-- First run / fresh DB, migrations on old data, schema drift, and legacy rows.
-- Single-item vs no-items vs many-items rendering (0, 1, and N).
-- Component lifecycle: unmount during an in-flight request, rapid re-mounts,
-  stale async results overwriting newer ones (guard with cancellation flags).
-- Browser back/forward, hard refresh, and multi-tab concurrency.
-- Integer vs float, overflow, and rounding for money — use cents/decimal,
-  never float for currency.
-
-WHEN a failure mode is possible but not handled, acknowledge it in the
-implementation (comment or explicit guard), and if you can reasonably handle
-it cheaply — do so. Never let an edge case silently produce wrong data.
+The full edge-case checklist (nulls/empties/concurrency/idempotency/network
+failures/timezones/unicode/money/render boundaries) is loaded from the
+sub-context "common_edge_cases" on demand: context_manage(action="activate",
+contextId="common_edge_cases"). ACTIVATE IT before you implement or review
+logic, and deactivate it afterwards. Core rule right here: always think about
+the boundaries — never let an edge case silently produce wrong data.
 
 ==================================================
 24. TODO / TASK LIST MANAGEMENT
 ==================================================
 
-Use the todo_write tool to keep the work on track and communicate progress.
+Call todo_write to record a structured plan BEFORE you begin ANY multi-step,
+long-running, or non-trivial task (building/running a project, fixing a failing
+build, adding a feature, refactoring, debugging across files, running multiple
+verifications). This is MANDATORY for multi-step work, not optional.
 
-PLAN WITH TODOS:
-- Before starting a multi-step task, write a todo list of the steps you'll
-  take (typically 3-8 items). This drives the on-screen task list and lets
-  the user see what's happening.
-- Order them logically (understand → implement → verify). Keep each item
-  action-oriented and small enough to finish in one working chunk.
+- PLAN FIRST: write 3-8 actionable todos covering understand → implement →
+  verify. Order them logically.
+- One in_progress at a time; exactly one while work remains.
+- Mark a todo completed the moment that step is actually done and verified.
+- Add or split todos as the task grows — a long task's plan must stay honest.
+- ONLY skip todos for genuinely trivial single-step fixes.
 
-UPDATE AS YOU GO:
-- Mark a todo completed the moment its work is actually verified, not when
-  you start the next thing.
-- When you hit a step that turns out to require sub-work, split or add items
-  rather than cramming everything into "in progress".
-- If a step is no longer needed, mark it cancelled and say why in the
-  final summary rather than leaving stale items.
-- Keep at most one item "active"/in_progress at a time.
+The full task-list discipline (mark done only when actually verified, cancel
+stale items instead of leaving them, no over-management) is preloaded for every
+run via the sub-context "todo_management". Core rule: keep the on-screen task
+list honest — never finish with unfinished-looking todos if the work is done.
 
-DON'T OVER-MANAGE:
-- A short task (one file or one fix) may not need todos at all — don't add
-  ceremony for trivial work.
-- Don't keep a todo "in progress" for work you've actually finished; the
-  task list must reflect reality (the UI shows progress off this list).
-- Don't delete/recreate the whole list in every message; update incrementally.
-- When you've finished, the task list should show every step done (or
-  cancelled with a reason) — never leave the run with unfinished-looking
-  todos if the work is complete.
+==================================================
+25. CONTEXT MANAGER — SUB-CONTEXT SWITCHING SYSTEM
+==================================================
+
+The main system prompt above holds your CORE rules. Deeper, situation-specific
+guidance lives in SUB-CONTEXTS that YOU load and unload during the run with
+the context_manage tool, so you only pay the context cost for the guidance the
+current step actually needs.
+
+HOW TO THINK ABOUT IT (this is the key to working well with a lean prompt):
+
+- This main system prompt is STATIC and LEAN. It does NOT change during the
+  run, so do NOT re-read, re-summarize, or quote it back every loop — it is
+  always the same knowledge base you already have. The thing that DOES change
+  every loop is the SUB-CONTEXT PANEL: that is your LIVE working set, and it is
+  what you must actively drive turn to turn.
+- The sub-contexts are your on-demand EXTERNAL BRAIN: activate the guidance you
+  need for the CURRENT step, deactivate it the moment that step's domain ends.
+  Keeping them small is how you keep the effective system prompt small and
+  focused while the task gets deep.
+- To avoid both forgetting AND overloading: each loop, scan the PANEL once,
+  confirm the active set matches what you are doing RIGHT NOW, and adjust with
+  context_manage when the work shifts. Do not let stale contexts linger (they
+  waste tokens and add noise); do not open context just in case (it bloats the
+  prompt). ACTIVATE when a domain is actively relevant, DEACTIVATE when it no
+  longer is — reason about the CURRENT step, not the whole history.
+
+HOW TO USE IT:
+
+1) SESSION START — an initial set of sub-contexts (0-${MAX_ACTIVE_CONTEXTS}) is AUTO-SELECTED for you
+   from the task's wording and shown in the SUB-CONTEXT PANEL. Check that panel:
+   if it already fits the work, start immediately. If it does not, call
+   context_manage to open the guidance you need / close anything irrelevant
+   BEFORE you start working. Base it on the task the user described, not on
+   every sub-context that exists:
+   - "create a frontend app / build a page / fix this UI" → activate
+     frontend_ui + common_edge_cases + efficient_editing (and api_contract
+     if forms/API calls are involved).
+   - "backend service / microservices / kafka / grpc / queue" → activate
+     backend_scale + common_edge_cases + (api_contract | data_modeling).
+   - "this bug keeps failing / 500 error" → debugging + backend_scale (or
+     frontend_ui for UI bugs) + common_edge_cases.
+   - "pick libraries / set up test runners" → library_guide + verification_rigor.
+   - "generate a PDF / export to PDF / create a report" → activate
+     pdf_generation + common_edge_cases.
+   - "create a presentation / PowerPoint / slide deck" → activate
+     ppt_generation + common_edge_cases.
+   - "create an Excel file / spreadsheet / export to xlsx" → activate
+     excel_generation + common_edge_cases.
+   - A short read-only question → open ZERO sub-contexts; stay lean.
+
+2) DURING THE TASK — if you find the current work needs guidance that is not
+   yet loaded, call context_manage(action="activate", contextId=...) right
+   then and CONTINUE the work as normal (the panel takes effect next loop).
+   This includes swap: when already at ${MAX_ACTIVE_CONTEXTS}, deactivate a context you no longer
+   need, then activate the new one.
+
+3) CLOSE WHEN DONE — once a sub-context's domain is no longer part of the
+   current step, deactivate it to free slots and tokens. You can reopen it
+   any time later.
+
+RULES:
+- At most ${MAX_ACTIVE_CONTEXTS} sub-contexts are active at once (ACTIVE [n/${MAX_ACTIVE_CONTEXTS}]). Opening a ${MAX_ACTIVE_CONTEXTS + 1}th is
+  blocked until you close one (swap one-in, one-out).
+- Every turn shows a SUB-CONTEXT PANEL with your ACTIVE list and the AVAILABLE
+  catalog. Read it and act on the state it shows — do not guess.
+- Never open sub-contexts "just in case" in bulk — 2-${MAX_ACTIVE_CONTEXTS} well-chosen ones for the
+  task, and close the ones you've stopped using.
+
+WHAT TO LOAD WHEN (id — when to activate):
+${renderSystemPromptCatalog()}
+
+REMEMBER: This system prompt is your lean, FIXED core — you never re-read it.
+The SUB-CONTEXT PANEL is your live, changing working set. Each loop: scan the
+panel, keep active contexts matching the CURRENT step, and activate/deactivate
+with context_manage as the work shifts. Open what the step needs, close what
+it no longer needs, swap one-in / one-out within the ${MAX_ACTIVE_CONTEXTS}-slot limit. A small,
+correctly-scoped active set is how you stay focused and avoid both an overloaded
+prompt and forgetfulness. Context is a live tool — drive it every step.
+${opts?.huggingFace?.configured ? `
+==================================================
+HUGGING FACE ASSETS (configured — token status: ${opts.huggingFace.status}${opts.huggingFace.tier ? `, tier: ${opts.huggingFace.tier}` : ''})
+==================================================
+A Hugging Face token is available on this machine. It is referenced by the
+environment variable ${opts.huggingFace.envName} and by the secret name
+"huggingface" in the Secret Manager.
+
+MODEL TIER RULE:
+- Detected token tier: ${opts.huggingFace.tier || 'free'} (from whoami; 'paid' =
+  Pro or billing-enabled account, 'free' = Basic account).
+- If the token is FREE: use ONLY models marked [FREE] in the hugging_face
+  sub-context. Do NOT call paid/credit models (fal-ai/wavespeed/replicate/
+  nscale image+video, etc.) — they return "credit depleted" / 402. Pick a FREE
+  model and adapt the task to it.
+- If the token is PAID: the full model catalog is available; use the best model
+  for the task.
+- If tier is unknown or blank, assume FREE (be conservative).
+
+RULES:
+- To USE the token for a task (generate video/voice/image/audio/text with HF
+  models), first call secret_manager(action="read", name="huggingface") — the
+  run will pause and ask the user for approval. NEVER access it without that
+  approval.
+- Treat the retrieved value as the ${opts.huggingFace.envName} env var inside a
+  command: export ${opts.huggingFace.envName}=<value>; curl … . Never print,
+  echo, or log the raw token, and redact it from every reply and artifact.
+- HF lets you call models in ALL categories: text/LLM chat (router
+  https://router.huggingface.co/v1/chat/completions), video (Wan2.x,
+  HunyuanVideo, LTX-Video, CogVideoX), voice/TTS (Kokoro, XTTS-v2, Bark,
+  MeloTTS), image (FLUX.1, SD3.5, SDXL), audio/music (MusicGen, Stable Audio),
+  speech-to-text (Whisper), vision (Qwen2.5-VL), embedding (BGE). Open the
+  hugging_face sub-context for the full model list + endpoint reference.
+  NOTE: always use router.huggingface.co — the old api-inference.huggingface.co
+  host is retired and fails DNS on every network. On a 401, re-read the secret
+  fresh via secret_manager and retry; do not reuse a stale transcript value.
+- Wrap every generated media path in the asset marker so the frontend renders
+  a playable/previewable card, on its own line:
+    <file-SM-st>/abs/path/clip.mp4<file-sm-ed>
+    <file-SM-st>C:\\Users\\me\\assets\\voice.wav<file-sm-ed>
+- If the token status is "invalid", tell the user to update it in Settings.
+  Do not attempt HF calls with an invalid token.
+` : `
+==================================================
+HUGGING FACE (not configured)
+==================================================
+No Hugging Face token is saved yet. If the user asks for video/voice/image/
+audio assets generated with HF models, tell them they need to add their
+Hugging Face token in Settings → Hugging Face first, or ask them to save it
+and retry. Do not attempt HF calls without a token.
+`}
+${opts?.mcp?.configured && opts.mcp.servers.length > 0 ? `
+==================================================
+MCP SERVERS (configured — ${opts.mcp.servers.length} server${opts.mcp.servers.length > 1 ? 's' : ''})
+==================================================
+External Model Context Protocol (MCP) servers are connected to this run.
+Each server exposes tools prefixed with its name (e.g. "${opts.mcp.servers[0].name}__tool_name").
+${opts.mcp.servers.map(s => `- ${s.name}: ${s.description}`).join('\n')}
+
+RULES:
+- MCP servers activate/deactivate like sub-contexts via context_manage.
+- Use context_manage(action="activate", contextId="mcp_<id>") to load a
+  server's tools. Max ${MAX_ACTIVE_MCP} MCP servers active at once.
+- When an MCP server's context is active, its tools become available to you.
+- Tool calls use the format: <serverName>__<toolName> (double underscore).
+- Deactivate an MCP server when its tools are no longer needed to free a slot.
+` : ''}
 
 Remember:
 
@@ -2564,9 +3294,16 @@ NEVER CLAIM WORK YOU DID NOT PERFORM.
 ## Mode: Build
 You have FULL access to read, write, run commands, and git.
 - Read files before editing. Then edit immediately.
+- After editing, START the project, check its logs/errors, FIX any TypeScript or
+  runtime errors you find, then re-test until green — do not stop after editing
+  while the app would still fail (see Section 11b).
 - Run tests/verification after changes.
 - Make minimal, surgical changes — replace_lines (or edit_file) over write_file for existing code.
 - Complete ALL parts of a task before finishing.
+- For multi-step or long-running work (building/fixing a project, a full
+  feature, debugging across files), FIRST call todo_write to lay out the steps,
+  then keep the list updated (one in_progress, mark done as you verify). Do not
+  silently grind through a long task without a visible todo plan.
 - For servers: run_command(command="node server.js", background=true), then verify with curl.`;
       case 'plan':
         return `${base}${projectContext}
@@ -2617,6 +3354,43 @@ Search-only access. Find files, understand structure, answer questions about the
         await new Promise((r) => setTimeout(r, delay));
       }
     }
+  }
+
+  /**
+   * Idle-reset deadline guard for a single LLM call.
+   *
+   * A fixed wall-clock timeout (~120s) silently kills slow-deliberation models
+   * — e.g. oc/big-pickle on the local OmniRoute gateway — which legitimately
+   * stream long reasoning runs for minutes, then flags the run `repeated_error`.
+   * This guard instead aborts only when the call makes NO forward progress for
+   * `idleMs` (default 90s, env `AGENT_LLM_IDLE_TIMEOUT_MS`) or blows past a
+   * generous absolute ceiling (default 15min, env `AGENT_LLM_TIMEOUT_MS`).
+   * `touch()` resets the idle clock on every received SSE chunk, so a
+   * slow-but-alive model runs to completion; a genuinely dead stream is killed
+   * promptly. `dispose()` clears the watchdog once the call settles.
+   */
+  private createLLMTimeoutSignal(external?: AbortSignal) {
+    const idleMs = Number(process.env.AGENT_LLM_IDLE_TIMEOUT_MS) || 90_000;
+    const capMs = Number(process.env.AGENT_LLM_TIMEOUT_MS) || 900_000;
+    const controller = new AbortController();
+    const signal = external ? AbortSignal.any([external, controller.signal]) : controller.signal;
+    let lastActivity = Date.now();
+    const startedAt = lastActivity;
+    const timer = setInterval(() => {
+      const now = Date.now();
+      if (now - lastActivity > idleMs) {
+        controller.abort(new Error(`LLM stream stalled (no tokens for ${Math.round(idleMs / 1000)}s)`));
+      } else if (now - startedAt > capMs) {
+        controller.abort(new Error(`LLM call exceeded ${Math.round(capMs / 1000)}s ceiling`));
+      }
+    }, 5_000);
+    // Never keep the process alive solely for the watchdog.
+    if (typeof timer.unref === 'function') timer.unref();
+    return {
+      signal,
+      touch: () => { lastActivity = Date.now(); },
+      dispose: () => clearInterval(timer),
+    };
   }
 
   private async callLLM(
@@ -2672,6 +3446,13 @@ Search-only access. Find files, understand structure, answer questions about the
       const apiKey = userKey || process.env.OPENCODE_API_KEY || process.env.LLM_API_KEY || '';
       if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
       url = `https://opencode.ai/zen/v1/chat/completions`;
+    } else if (provider === 'omniroute') {
+      // OmniRoute: local OpenAI-compatible gateway (github.com/diegosouzapw/OmniRoute).
+      // Keyless by default; use the user's saved key, else the env/placeholder.
+      const omniKey = userKey || process.env.OMNIROUTE_API_KEY || 'omniroute';
+      if (omniKey) headers['Authorization'] = `Bearer ${omniKey}`;
+      const omniBase = process.env.OMNIROUTE_BASE_URL || 'http://localhost:20128/v1';
+      url = `${omniBase.replace(/\/+$/, '')}/chat/completions`;
     } else if (provider === 'ollama' || !provider) {
       url = `${baseUrl}/api/chat`;
     }
@@ -2710,18 +3491,30 @@ Search-only access. Find files, understand structure, answer questions about the
 
     // Tie the request to the run's abort signal so interrupt() cancels an
     // in-flight LLM call immediately instead of waiting for the next step.
+    // The LLM deadline itself is IDLE-based (see createLLMTimeoutSignal): a
+    // fixed 120s wall-clock cap used to abort slow-deliberation models (e.g.
+    // oc/big-pickle on the local OmniRoute gateway) mid-thought and then flag
+    // the run `repeated_error`. Now only a genuinely silent stream is killed —
+    // a slow-but-alive reasoning stream runs to completion.
     const activeController = sessionId ? this.activeRuns.get(sessionId) : undefined;
-    const timeoutSignal = AbortSignal.timeout(120_000);
-    const signal = activeController ? AbortSignal.any([activeController.signal, timeoutSignal]) : timeoutSignal;
+    const llmDeadline = this.createLLMTimeoutSignal(activeController?.signal);
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: llmDeadline.signal,
+      });
+    } catch (err) {
+      llmDeadline.dispose();
+      throw err;
+    }
+    llmDeadline.touch(); // headers arrived — reset the idle clock
 
     if (!response.ok) {
+      llmDeadline.dispose();
       const errText = await response.text().catch(() => 'Unknown error');
       const err = new Error(`LLM API error (${response.status}): ${errText.slice(0, 500)}`) as Error & { status?: number };
       err.status = response.status;
@@ -2730,6 +3523,7 @@ Search-only access. Find files, understand structure, answer questions about the
 
     // Non-streaming path (ollama or fallback)
     if (!useStreaming) {
+      llmDeadline.touch();
       const data = await response.json() as any;
       if (provider === 'ollama' || !provider) {
         const msg = data.message;
@@ -2752,9 +3546,11 @@ Search-only access. Find files, understand structure, answer questions about the
             },
           }))
           .filter((tc) => tc.function.name.trim() !== '');
+        llmDeadline.dispose();
         return {
           content: msg?.content || null,
           tool_calls,
+          reasoning: (typeof msg?.reasoning === 'string' && msg.reasoning) || (typeof msg?.thinking === 'string' && msg.thinking) ? (msg.reasoning ?? msg.thinking) : null,
           usage: data.prompt_eval_count ? {
             prompt_tokens: data.prompt_eval_count || 0,
             completion_tokens: data.eval_count || 0,
@@ -2762,24 +3558,33 @@ Search-only access. Find files, understand structure, answer questions about the
         };
       }
       const choice = data.choices?.[0];
+      const msg = choice?.message;
       return {
-        content: choice?.message?.content || null,
-        tool_calls: this.normalizeToolCalls(choice?.message?.tool_calls || []),
+        content: msg?.content || null,
+        tool_calls: this.normalizeToolCalls(msg?.tool_calls || []),
+        reasoning: ['reasoning_content', 'reasoning', 'thinking', 'thought']
+          .map((k) => (typeof msg?.[k] === 'string' ? msg[k] : ''))
+          .join('') || null,
         usage: data.usage ? {
           prompt_tokens: data.usage.prompt_tokens || 0,
           completion_tokens: data.usage.completion_tokens || 0,
         } : undefined,
       };
+      llmDeadline.dispose();
     }
 
-    // Streaming path — parse SSE chunks and emit text.delta in real-time
-    return this.parseStreamingResponse(response, sessionId, runId);
+    // Streaming path — parse SSE chunks and emit text.delta in real-time.
+    // touch() on every chunk keeps the idle deadline honest; dispose() clears
+    // the watchdog from parseStreamingResponse's finally.
+    return this.parseStreamingResponse(response, sessionId, runId, llmDeadline.touch, llmDeadline.dispose);
   }
 
   private async parseStreamingResponse(
     response: Response,
     sessionId?: string,
     runId?: string,
+    touch?: () => void,
+    dispose?: () => void,
   ): Promise<LLMResponse> {
     const reader = response.body?.getReader();
     if (!reader) throw new Error('No response body');
@@ -2787,6 +3592,7 @@ Search-only access. Find files, understand structure, answer questions about the
     const decoder = new TextDecoder();
     let buffer = '';
     let content = '';
+    let reasoning = '';
     const toolCalls: LLMToolCall[] = [];
     let usage: { prompt_tokens: number; completion_tokens: number } | undefined;
     let finishReason: string | null = null;
@@ -2796,6 +3602,7 @@ Search-only access. Find files, understand structure, answer questions about the
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        touch?.(); // any progress on the wire = the model is alive
 
         buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
 
@@ -2823,6 +3630,19 @@ Search-only access. Find files, understand structure, answer questions about the
                 content += delta.content;
                 if (sessionId && runId) {
                   this.eventEmitter.emitTextDelta(sessionId, runId, 'streaming', delta.content);
+                }
+              }
+
+              // Reasoning/thinking delta ("Thought phase") — fields vary by
+              // provider and usually arrive BEFORE content (DeepSeek
+              // reasoning_content, OpenAI reasoning, Anthropic thinking,
+              // Gemini thoughts via extra_content). Stream it live + keep it
+              // for the final assistant message.
+              const thought = this.extractThoughtDelta(delta);
+              if (thought) {
+                reasoning += thought;
+                if (sessionId && runId) {
+                  this.eventEmitter.emitTextThought(sessionId, runId, 'streaming', thought);
                 }
               }
 
@@ -2854,6 +3674,7 @@ Search-only access. Find files, understand structure, answer questions about the
         }
       }
     } finally {
+      dispose?.();
       reader.releaseLock();
     }
 
@@ -2872,6 +3693,8 @@ Search-only access. Find files, understand structure, answer questions about the
           if (chunk.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
           if (!delta) continue;
           if (delta.content) content += delta.content;
+          const thought = this.extractThoughtDelta(delta);
+          if (thought) reasoning += thought;
           if (delta.tool_calls) {
             for (const tc of delta.tool_calls) {
               const idx = tc.index ?? 0;
@@ -2917,7 +3740,35 @@ Search-only access. Find files, understand structure, answer questions about the
       tool_calls: toolCalls,
       usage,
       finish_reason: finishReason,
+      reasoning: reasoning || null,
     };
+  }
+
+  /**
+   * Extracts the reasoning/thinking text from a streaming `choice.delta`,
+   * tolerating the field names used across providers:
+   *   · DeepSeek / GLM / Qwen — `delta.reasoning_content`
+   *   · OpenAI reasoning models — `delta.reasoning`
+   *   · Anthropic-style (via OpenAI-compat proxies) — `delta.thinking`
+   *   · Gemini 2.5/3 (openai-compat) — `delta.reasoning_content` or nested
+   *     `extra_content.google.thinking`
+   * Returns the concatenated text ('' when the chunk carries no reasoning).
+   */
+  private extractThoughtDelta(delta: any): string {
+    if (!delta || typeof delta !== 'object') return '';
+    const parts: string[] = [];
+    for (const key of ['reasoning_content', 'reasoning', 'thinking', 'thought', 'reasoning_text']) {
+      const v = delta[key];
+      if (typeof v === 'string' && v) parts.push(v);
+    }
+    const extra = delta.extra_content;
+    if (extra && typeof extra === 'object') {
+      const gemini = extra.google;
+      if (gemini && typeof gemini.thinking === 'string' && gemini.thinking) {
+        parts.push(gemini.thinking);
+      }
+    }
+    return parts.join('');
   }
 
   /**

@@ -59,6 +59,8 @@ export interface WsServerMessage {
 // Event types emitted by the agent
 export const AGENT_EVENT_TYPES = {
   TEXT_DELTA: 'text.delta',
+  TEXT_THOUGHT: 'text.thought',
+  CONTEXT_UPDATED: 'context.updated',
   TEXT_END: 'text.end',
   TOOL_STARTED: 'tool.started',
   TOOL_OUTPUT: 'tool.output',

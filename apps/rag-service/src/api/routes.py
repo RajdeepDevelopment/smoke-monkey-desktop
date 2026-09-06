@@ -135,9 +135,7 @@ async def models() -> dict:
         settings.nvidia_chat_model
     ]
     providers.append({"id": "nvidia", "label": "NVIDIA NIM (cloud)", "models": nv_models})
-    or_models_free = [
-        m.strip() for m in settings.omniroute_chat_models.split(",") if m.strip()
-    ] or [settings.omniroute_chat_model]
+    or_models_free = settings.free_chat_models or [settings.omniroute_chat_model]
     providers.append(
         {"id": "omniroute", "label": "OmniRoute (free, keyless)", "models": or_models_free}
     )
@@ -149,6 +147,16 @@ async def models() -> dict:
             "id": "opencode",
             "label": "OpenCode Zen (free)",
             "models": oc_models,
+        }
+    )
+    hf_models = [m.strip() for m in settings.huggingface_chat_models.split(",") if m.strip()] or [
+        settings.huggingface_chat_model
+    ]
+    providers.append(
+        {
+            "id": "huggingface",
+            "label": "Hugging Face (cloud)",
+            "models": hf_models,
         }
     )
 
@@ -202,6 +210,7 @@ async def models() -> dict:
         + [chat_model_entry(settings.ollama_chat_model, "ollama")]
         + [{"id": m, "name": m, "provider": "omniroute", "isFree": True} for m in or_models_free]
         + [{"id": m, "name": m, "provider": "opencode", "isFree": True} for m in oc_models]
+        + [chat_model_entry(m, "huggingface") for m in hf_models]
     )
 
     # Recommended presets from the dynamic catalog (the "model picker" table).

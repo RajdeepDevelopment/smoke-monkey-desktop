@@ -29,6 +29,11 @@ import { AgentFileChange } from './modules/agent/entities/agent-file-change.enti
 import { AgentPermission } from './modules/agent/entities/agent-permission.entity';
 import { SshModule } from './modules/ssh/ssh.module';
 import { SshConnection } from './modules/ssh/entities/ssh-connection.entity';
+import { UserSecret } from './modules/secrets/user-secret.entity';
+import { SecretsModule } from './modules/secrets/secrets.module';
+import { OmniRouteModule } from './modules/omniroute/omniroute.module';
+import { McpModule } from './modules/mcp/mcp.module';
+import { McpServer } from './modules/mcp/mcp-server.entity';
 
 @Module({
   imports: [
@@ -38,7 +43,7 @@ import { SshConnection } from './modules/ssh/entities/ssh-connection.entity';
       inject: [ConfigService],
       useFactory: (config: ConfigService) =>
         buildTypeOrmOptions(config, {
-          entities: [User, DocumentEntity, Conversation, Message, UserApiKey, AgentSession, AgentRun, AgentMessage, AgentFileChange, AgentPermission, SshConnection],
+          entities: [User, DocumentEntity, Conversation, Message, UserApiKey, UserSecret, AgentSession, AgentRun, AgentMessage, AgentFileChange, AgentPermission, SshConnection, McpServer],
         }),
     }),
     CommonModule,
@@ -53,8 +58,11 @@ import { SshConnection } from './modules/ssh/entities/ssh-connection.entity';
     PlaygroundModule,
     AnalyticsModule,
     SettingsModule,
+    SecretsModule,
     AgentModule,
     SshModule,
+    OmniRouteModule,
+    McpModule,
   ],
   providers: [
     {

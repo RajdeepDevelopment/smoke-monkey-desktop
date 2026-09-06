@@ -8,25 +8,28 @@
   :root {
     color-scheme: dark;
 
-    // ── Smoke Monkey core surfaces (very dark neutral blue-gray) ──
-    --bg: 216 39% 5%;             // #070B10
-    --bg-elevated: 217 36% 6%;    // sidebar / elevated chrome
-    --surface-950: 216 39% 5%;
-    --surface-900: 216 35% 8%;    // #0D131D primary surface
-    --surface-850: 218 36% 10%;
-    --surface-800: 221 39% 11%;   // #111827 elevated surface
-    --surface-700: 215 28% 17%;
-    --surface-600: 215 25% 27%;
+    // ── Smoke Monkey core surfaces (layered dark theme) ──
+    //  bg → primary → secondary → elevated → hover  (never flat, never pure black)
+    --bg: 220 38% 5%;             // #080B12 application background
+    --bg-elevated: 219 33% 8%;    // #0D111A sidebar / elevated chrome
+    --surface-950: 220 38% 5%;
+    --surface-900: 219 33% 8%;    // #0D111A primary surface
+    --surface-850: 222 30% 10%;   // between primary and secondary
+    --surface-800: 221 39% 11%;   // #111827 secondary surface
+    --surface-750: 223 30% 13%;   // #192231 hover surface
+    --surface-700: 223 28% 12%;   // #151C28 elevated surface
+    --surface-600: 226 22% 20%;
 
     // Ink (text)
     --ink-primary: 210 40% 98%;
     --ink-secondary: 213 27% 65%;
     --ink-muted: 215 20% 47%;
 
-    // Brand
-    --primary: 262 83% 58%;
-    --primary-hover: 258 90% 66%;
-    --primary-subtle: 262 83% 58% / 0.15;
+    // Brand — purple accent (Smoke Monkey primary)
+    --primary: 258 90% 66%;       // #8B5CF6
+    --primary-hover: 260 92% 76%; // #A78BFA soft accent
+    --primary-deep: 263 74% 50%;  // #6D28D9 deep accent
+    --primary-subtle: 258 90% 66% / 0.15;
     --primary-foreground: 0 0% 100%;
     --accent: 188 94% 43%;
     --accent-hover: 189 86% 53%;
@@ -34,18 +37,23 @@
     --accent-foreground: 0 0% 100%;
 
     // Semantic
-    --success: 142 71% 45%;
+    --success: 142 71% 45%;       // #22C55E
     --success-subtle: 142 71% 45% / 0.12;
-    --warning: 38 92% 50%;
+    --warning: 38 92% 50%;        // #F59E0B
     --warning-subtle: 38 92% 50% / 0.12;
-    --destructive: 0 84% 60%;
+    --destructive: 0 84% 60%;     // #EF4444
     --destructive-foreground: 0 0% 100%;
     --error-subtle: 0 84% 60% / 0.12;
+    --info: 199 89% 60%;          // #38BDF8
 
     // shadcn-ui aliases
     --background: var(--bg);
     --foreground: var(--ink-primary);
-    --border: 215 25% 18%;
+    // NOTE: no alpha baked in here — Tailwind's border-border/40 support
+    // needs a plain hsl, otherwise the declaration turns invalid and borders
+    // fall back to currentColor (white). Alpha is applied via modifiers.
+    --border: 215 22% 22%;
+    --border-strong: 215 22% 32%;
     --input: 215 25% 20%;
     --ring: 262 83% 58%;
     --secondary: 219 40% 11%;
@@ -199,40 +207,59 @@
 
   // ── Glassmorphism utilities ────────────────────────────────────
   .glass-panel {
-    background: hsla(219, 38%, 8%, 0.72);
+    background: hsla(219, 33%, 8%, 0.72);
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
-    border: 1px solid hsla(215, 25%, 18%, 0.6);
+    border: 1px solid rgba(148, 163, 184, 0.10);
   }
   .glass-hover {
     transition: background-color 150ms ease;
     &:hover {
-      background: hsla(219, 38%, 8%, 0.85);
+      background: hsla(219, 33%, 8%, 0.85);
     }
   }
   .glass-active {
-    background: hsla(262, 83%, 58%, 0.10);
-    border-color: hsla(262, 83%, 58%, 0.40);
+    background: hsla(258, 90%, 66%, 0.10);
+    border-color: rgba(139, 92, 246, 0.40);
   }
   .glass-border {
-    border-color: hsla(215, 25%, 18%, 0.6);
+    border-color: rgba(148, 163, 184, 0.10);
   }
   .glass-border-bottom {
-    border-bottom: 1px solid hsla(215, 25%, 18%, 0.6);
+    border-bottom: 1px solid rgba(148, 163, 184, 0.10);
   }
   .glass-border-top {
-    border-top: 1px solid hsla(215, 25%, 18%, 0.6);
+    border-top: 1px solid rgba(148, 163, 184, 0.10);
   }
   .glass-border-left {
-    border-left: 1px solid hsla(215, 25%, 18%, 0.6);
+    border-left: 1px solid rgba(148, 163, 184, 0.10);
+  }
+
+  // ── Border hierarchy (from the design system) ────────────────────
+  .bd-subtle { border-color: rgba(148, 163, 184, 0.10); }   // default separation
+  .bd-hover { border-color: rgba(139, 92, 246, 0.35); }      // hover
+  .bd-active { border-color: rgba(139, 92, 246, 0.55); }     // active/focused
+  .hover-bd-hover:hover { border-color: rgba(139, 92, 246, 0.35); }
+
+  // ── Surface elevation ladder ────────────────────────────────────
+  .surface-elevated { background: hsl(var(--surface-700)); }
+  .surface-hover { background: hsl(var(--surface-750)); }
+
+  // ── Focus glow (purple) — used instead of heavy ring stacks ────
+  .focus-glow {
+    transition: box-shadow 150ms ease, border-color 150ms ease;
+    &:focus-visible {
+      outline: none;
+      box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.35), 0 8px 30px rgba(109, 40, 217, 0.18);
+    }
   }
 
   // ── Workspace background ──────────────────────────────────────
   .workspace-bg {
     background:
-      radial-gradient(circle at 20% 10%, hsla(262, 83%, 58%, 0.08), transparent 30%),
-      radial-gradient(circle at 80% 80%, hsla(217, 90%, 50%, 0.05), transparent 30%),
-      hsl(216, 39%, 5%);
+      radial-gradient(circle at 22% 8%, hsla(258, 90%, 66%, 0.09), transparent 32%),
+      radial-gradient(circle at 82% 80%, hsla(217, 90%, 50%, 0.05), transparent 30%),
+      hsl(220, 38%, 5%);
   }
 }
 
