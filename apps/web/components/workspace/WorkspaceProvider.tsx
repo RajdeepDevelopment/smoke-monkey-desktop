@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useReducer, type ReactNode } from 'react';
 
 type BottomPanelState = 'hidden' | 'collapsed' | 'expanded' | 'pinned';
-type ActivityPanel = 'explorer' | 'agent' | 'terminal' | 'search' | 'scm' | 'settings';
+type ActivityPanel = 'explorer' | 'agent' | 'terminal' | 'search' | 'scm' | 'settings' | 'ssh';
 
 interface WorkspaceState {
   activePanel: ActivityPanel;

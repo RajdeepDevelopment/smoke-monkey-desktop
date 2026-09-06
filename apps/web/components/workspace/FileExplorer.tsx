@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { ideApi, GIT_STATUS_META, type TreeNode, type GitStatusEntry } from '../../lib/ide-api';
+import { createWorkspaceClient, type WorkspaceClient } from '../../lib/workspace-client';
 import { FileIcon } from './FileIcon';
 import { useContextMenu } from './ContextMenu';
 
@@ -35,6 +36,8 @@ interface Props {
   onRefresh?: () => void;
   loading?: boolean;
   className?: string;
+  /** Optional mode-aware client for Remote-SSH. Defaults to local. */
+  client?: WorkspaceClient;
 }
 
 function sortEntries(list: TreeNode[]): TreeNode[] {
@@ -69,7 +72,9 @@ export const FileExplorer = memo(function FileExplorer({
   onRefresh,
   loading,
   className,
+  client: clientProp,
 }: Props) {
+  const client = clientProp ?? createWorkspaceClient('local');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [lazyChildren, setLazyChildren] = useState<Record<string, TreeNode[]>>({});
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
@@ -152,7 +157,7 @@ export const FileExplorer = memo(function FileExplorer({
         // Lazy-load deeper levels on first expand
         setLoadingDirs((prev) => new Set(prev).add(entry.path));
         try {
-          const kids = await ideApi.fileTree(entry.path, 1);
+          const kids = await client.fileTree(entry.path, 1);
           setLazyChildren((prev) => ({ ...prev, [entry.path]: kids }));
         } catch { /* leave collapsed */ } finally {
           setLoadingDirs((prev) => {
@@ -169,7 +174,7 @@ export const FileExplorer = memo(function FileExplorer({
         return next;
       });
     },
-    [expanded, lazyChildren],
+    [expanded, lazyChildren, client],
   );
 
   const handleKeyDown = useCallback(
@@ -225,10 +230,10 @@ export const FileExplorer = memo(function FileExplorer({
       }
       try {
         if (inputState.mode === 'create') {
-          await ideApi.createEntry(`${inputState.parentDir}/${name.trim()}`, inputState.type);
+          await client.createEntry(`${inputState.parentDir}/${name.trim()}`, inputState.type);
         } else if (inputState.mode === 'rename') {
           const dir = inputState.target.path.split('/').slice(0, -1).join('/');
-          await ideApi.renameEntry(inputState.target.path, `${dir}/${name.trim()}`);
+          await client.renameEntry(inputState.target.path, `${dir}/${name.trim()}`);
         }
         setInputState(null);
         onRefresh?.();
@@ -238,18 +243,18 @@ export const FileExplorer = memo(function FileExplorer({
         setInputState(null);
       }
     },
-    [inputState, onRefresh],
+    [inputState, onRefresh, client],
   );
 
   const deleteEntry = useCallback(
     async (target: TreeNode) => {
       if (!window.confirm(`Delete ${target.name}?`)) return;
       try {
-        await ideApi.deletePath(target.path);
+        await client.deletePath(target.path);
         onRefresh?.();
       } catch { /* ignore */ }
     },
-    [onRefresh],
+    [onRefresh, client],
   );
 
   const copyPath = useCallback((path: string) => {
@@ -284,7 +289,7 @@ export const FileExplorer = memo(function FileExplorer({
             }),
           ),
       },
-      { label: 'Reveal in Finder', icon: <ExternalLink className="h-3 w-3" />, onSelect: () => void ideApi.revealInFinder(entry.path) },
+      { label: 'Reveal in Finder', icon: <ExternalLink className="h-3 w-3" />, onSelect: () => void client.revealInFinder(entry.path) },
     ],
     [gitEntries, onFileSelect, onOpenGitDiff, relOf, deleteEntry, copyPath],
   );
@@ -315,7 +320,7 @@ export const FileExplorer = memo(function FileExplorer({
       {
         label: 'Reveal in Finder',
         icon: <ExternalLink className="h-3 w-3" />,
-        onSelect: () => void ideApi.revealInFinder(entry.path),
+        onSelect: () => void client.revealInFinder(entry.path),
       },
     ],
     [expanded, toggleDir, deleteEntry, copyPath],

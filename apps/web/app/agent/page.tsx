@@ -9,10 +9,13 @@ import type { AgentSession } from '../../lib/agent-api';
 import { agentApi } from '../../lib/agent-api';
 import { AgentChat } from '../../components/agent/AgentChat';
 import { AgentAppShell } from '../../components/workspace/AgentAppShell';
+import type { RemoteConnectionState } from '../../components/workspace/StatusBar';
 import { SidePanelContent } from '../../components/workspace/SidePanelContent';
 import { EditorArea, type GitDiffPayload } from '../../components/workspace/EditorArea';
 import { QuickOpen } from '../../components/workspace/QuickOpen';
 import { ideApi, type TreeNode, type GitStatusEntry } from '../../lib/ide-api';
+import { sshApi, type SshProfile } from '../../lib/ssh-api';
+import { createWorkspaceClient, type WorkspaceClient } from '../../lib/workspace-client';
 import { getFileViewerType, isEditableViewer, type FileViewerType } from '../../lib/file-types';
 import { nativeFetch, API_URL, getToken } from '../../lib/api';
 import { useAuth } from '../../components/AuthProvider';
@@ -20,6 +23,11 @@ import { useAuth } from '../../components/AuthProvider';
 const TerminalView = dynamic(
   () => import('../../components/agent/TerminalView').then(m => ({ default: m.TerminalView })),
   { ssr: false, loading: () => <div className="h-full bg-[#080C12] flex items-center justify-center text-ink-muted text-xs">Loading terminal...</div> }
+);
+
+const RemoteTerminal = dynamic(
+  () => import('../../components/ssh/RemoteTerminal').then(m => ({ default: m.RemoteTerminal })),
+  { ssr: false, loading: () => <div className="h-full bg-[#080C12] flex items-center justify-center text-ink-muted text-xs">Loading remote shell...</div> }
 );
 
 async function openFolderPicker(): Promise<string | null> {
@@ -91,6 +99,49 @@ export default function AgentPage() {
   const [injectedPrompt, setInjectedPrompt] = useState<{ text: string; nonce: number } | null>(null);
   const [autoSave, setAutoSave] = useState(true);
 
+  // ── Remote-SSH mode ─────────────────────────────────────────────────────
+  const [sshProfiles, setSshProfiles] = useState<SshProfile[]>([]);
+  const [sshMode, setSshMode] = useState<'local' | 'remote'>('local');
+  const [activeSshProfile, setActiveSshProfile] = useState<SshProfile | null>(null);
+  const client: WorkspaceClient = useMemo(
+    () => createWorkspaceClient(activeSshProfile ? { profile: activeSshProfile } : 'local'),
+    [activeSshProfile],
+  );
+
+  // Status bar connection state + connect/disconnect handler (VS Code-style).
+  const remoteConnection: RemoteConnectionState = useMemo(() => ({
+    profile: activeSshProfile
+      ? {
+          id: activeSshProfile.id,
+          name: activeSshProfile.name,
+          host: activeSshProfile.host,
+          username: activeSshProfile.username,
+          port: activeSshProfile.port,
+        }
+      : null,
+    connected: sshMode === 'remote' && !!activeSshProfile,
+    available: sshProfiles.map((p) => ({
+      id: p.id,
+      name: p.name,
+      host: p.host,
+      username: p.username,
+      port: p.port,
+    })),
+  }), [activeSshProfile, sshMode, sshProfiles]);
+
+  useEffect(() => {
+    (async () => {
+      try { const list = await sshApi.listProfiles(); setSshProfiles(list); } catch { /* ignore */ }
+    })();
+  }, []);
+
+  const localWorkspaceRef = useRef<string>('');
+  useEffect(() => {
+    if (!activeSshProfile && workspacePath && workspacePath !== '~') {
+      localWorkspaceRef.current = workspacePath;
+    }
+  }, [workspacePath, activeSshProfile]);
+
   useEffect(() => {
     try { setAutoSave(localStorage.getItem('sm-autosave') !== 'off'); } catch { /* ignore */ }
   }, []);
@@ -135,30 +186,33 @@ export default function AgentPage() {
     } catch { /* ignore */ }
   }
 
-  const loadFileTree = useCallback(async (root: string) => {
+  const loadFileTree = useCallback(async (root: string, depth = 1) => {
     if (!root) return;
     try {
       setFileTreeLoading(true);
-      const tree = await ideApi.fileTree(root, 3);
+      // Shallow by default: the FileExplorer lazy-loads each directory on expand,
+      // so fetching a deep tree here means dozens of serialized SSH round-trips
+      // on connect (the old depth-3 remote tree could hang the UI).
+      const tree = await client.fileTree(root, depth);
       setFileTree(tree);
     } catch {
       setFileTree([]);
     } finally {
       setFileTreeLoading(false);
     }
-  }, []);
+  }, [client]);
 
   const loadGitStatus = useCallback(async (root: string) => {
     if (!root) return;
     try {
       setGitLoading(true);
-      setGitStatus(await ideApi.gitStatus(root));
+      setGitStatus(await client.gitStatus(root));
     } catch {
       setGitStatus(null);
     } finally {
       setGitLoading(false);
     }
-  }, []);
+  }, [client]);
 
   // Workspace switch → reload everything
   useEffect(() => {
@@ -166,6 +220,47 @@ export default function AgentPage() {
     loadFileTree(workspacePath);
     loadGitStatus(workspacePath);
   }, [workspacePath, loadFileTree, loadGitStatus]);
+
+  // ── Remote-SSH mode switch ──────────────────────────────────────────────
+  const handleModeSwitch = useCallback(async (profile: SshProfile | null) => {
+    if (profile) {
+      try { localStorage.setItem('sm-active-ssh-profile', profile.id); } catch { /* ignore */ }
+      setActiveSshProfile(profile);
+      setSshMode('remote');
+      // Resolve the real remote folder: use the profile's explicit remoteHome,
+      // else ask the host to expand `~` so Explorer/agent/terminal operate on a
+      // concrete path instead of the literal string "~".
+      let root = profile.remoteHome?.trim();
+      if (!root || root === '~' || root === '~/') {
+        try {
+          const res = await sshApi.exec(profile.id, 'cd ~ && pwd');
+          root = (res.stdout || '').trim() || profile.remoteHome || '~';
+        } catch { root = profile.remoteHome || '~'; }
+      }
+      setWorkspacePath(root);
+      if (root) loadFileTree(root);
+    } else {
+      try { localStorage.removeItem('sm-active-ssh-profile'); } catch { /* ignore */ }
+      const localRoot = localWorkspaceRef.current || workspacePathRef.current || '';
+      setActiveSshProfile(null);
+      setSshMode('local');
+      setOpenFiles([]);
+      setConflicts({});
+      setWorkspacePath(localRoot);
+      if (localRoot) loadFileTree(localRoot);
+      loadGitStatus(localRoot);
+    }
+  }, [loadFileTree, loadGitStatus]);
+
+  const restoredRemote = useRef(false);
+  useEffect(() => {
+    if (restoredRemote.current || sshProfiles.length === 0 || sshMode !== 'local' || activeSshProfile) return;
+    restoredRemote.current = true;
+    let savedId = '';
+    try { savedId = localStorage.getItem('sm-active-ssh-profile') || ''; } catch { /* ignore */ }
+    const saved = sshProfiles.find((p) => p.id === savedId);
+    if (saved) handleModeSwitch(saved);
+  }, [sshProfiles, sshMode, activeSshProfile, handleModeSwitch]);
 
   // ── FS watcher: debounced tree/git refresh + external-change detection ──
   const openFilesRef = useRef(openFiles);
@@ -180,7 +275,7 @@ export default function AgentPage() {
     await Promise.all(snapshot.map(async (f) => {
       if (conflictsRef.current[f.path]) return; // already conflicted
       try {
-        const disk = await ideApi.readFile(f.path);
+        const disk = await client.readFile(f.path);
         if (disk.binary) return;
         if (!f.modified && disk.content !== f.originalContent) {
           // Clean editor → auto-reload with new disk content
@@ -197,7 +292,7 @@ export default function AgentPage() {
         }
       }
     }));
-  }, []);
+  }, [client]);
 
   useEffect(() => {
     if (!workspacePath) return;
@@ -210,12 +305,20 @@ export default function AgentPage() {
         checkExternalChanges();
       }, 400);
     };
+
+    if (client.isRemote()) {
+      // No local FS events exist for a remote host — poll cheaply instead so
+      // external changes on the remote machine still surface.
+      const poll = setInterval(schedule, 5000);
+      return () => clearInterval(poll);
+    }
+
     const unsubscribe = ideApi.subscribeFsEvents(workspacePath, schedule);
     return () => {
       if (timer) clearTimeout(timer);
       unsubscribe();
     };
-  }, [workspacePath, loadFileTree, loadGitStatus, checkExternalChanges]);
+  }, [workspacePath, loadFileTree, loadGitStatus, checkExternalChanges, client]);
 
   // ── Sessions ────────────────────────────────────────────────────────────
   const handleNewSession = useCallback(async (agentId = 'build') => {
@@ -265,7 +368,7 @@ export default function AgentPage() {
     try {
       if (isEditableViewer(kind) || kind === 'csv') {
         // Text-based: read as UTF-8 through the text endpoint
-        const res = await ideApi.readFile(path);
+        const res = await client.readFile(path);
         if (res.binary) {
           // Registry said text, disk disagrees — fall back safely
           const bin = await ideApi.readRawFile(path);
@@ -287,7 +390,7 @@ export default function AgentPage() {
       if (kind === 'svg' && !content) {
         // SVG needs both source (editable) and dataUrl (preview)
         try {
-          const txt = await ideApi.readFile(path);
+          const txt = await client.readFile(path);
           if (!txt.binary && !txt.truncated) content = txt.content;
         } catch { /* keep empty source */ }
       }
@@ -298,11 +401,11 @@ export default function AgentPage() {
     } catch (err) {
       console.error('Failed to read file:', err);
     }
-  }, [openFiles]);
+  }, [openFiles, client]);
 
   const handleSaveFile = useCallback(async (path: string, content: string) => {
     try {
-      await ideApi.writeFile(path, content);
+      await client.writeFile(path, content);
       setOpenFiles((prev) => prev.map((f) =>
         f.path === path ? { ...f, originalContent: content, modified: false } : f));
       setConflicts((prev) => {
@@ -313,7 +416,7 @@ export default function AgentPage() {
       });
       loadGitStatus(workspacePathRef.current);
     } catch (err) { console.error('Save failed:', err); }
-  }, [loadGitStatus]);
+  }, [loadGitStatus, client]);
 
   const handleContentChange = useCallback((path: string, content: string) => {
     setOpenFiles((prev) => prev.map((f) =>
@@ -353,7 +456,7 @@ export default function AgentPage() {
       const local = openFiles.find((f) => f.path === path);
       if (local) {
         try {
-          await ideApi.writeFile(path, local.content);
+          await client.writeFile(path, local.content);
           setOpenFiles((prev) => prev.map((f) =>
             f.path === path ? { ...f, originalContent: local.content, modified: false } : f));
         } catch (err) { console.error('Keep-changes write failed:', err); }
@@ -365,7 +468,7 @@ export default function AgentPage() {
       return next;
     });
     loadGitStatus(workspacePathRef.current);
-  }, [conflicts, openFiles, loadGitStatus]);
+  }, [conflicts, openFiles, loadGitStatus, client]);
 
   const handleOpenGitDiff = useCallback(async (relPath: string) => {
     const root = workspacePathRef.current;
@@ -486,8 +589,31 @@ export default function AgentPage() {
         breadcrumbs={breadcrumbs}
         isAgentRunning={isRunning}
         gitChangeCount={gitStatus?.entries.length ?? 0}
+        remote={remoteConnection}
+        onRemoteChange={(id) => {
+          const profile = id ? sshProfiles.find((p) => p.id === id) ?? null : null;
+          handleModeSwitch(profile);
+        }}
         topBarActions={
           <>
+            <div className="flex items-center gap-1 rounded glass-panel px-1.5 py-0.5">
+              <span className="text-[10px] text-ink-muted">Target:</span>
+              <select
+                value={sshMode === 'remote' && activeSshProfile ? activeSshProfile.id : ''}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  const profile = sshProfiles.find((p) => p.id === id) ?? null;
+                  handleModeSwitch(profile);
+                }}
+                className="bg-transparent text-[10px] text-foreground outline-none cursor-pointer max-w-[160px]"
+                title="Switch between local and remote (SSH) workspace"
+              >
+                <option value="">Local</option>
+                {sshProfiles.map((p) => (
+                  <option key={p.id} value={p.id}>SSH: {p.name}</option>
+                ))}
+              </select>
+            </div>
             <div className="flex items-center gap-1 rounded glass-panel px-1.5 py-0.5">
               <Cpu className="h-3 w-3 text-ink-muted" />
               <select value={selectedProvider}
@@ -538,6 +664,13 @@ export default function AgentPage() {
             onOpenGitDiff={handleOpenGitDiff}
             onModelChange={setSelectedModel}
             onProviderChange={handleProviderChange}
+            client={client}
+            activeSshProfileId={activeSshProfile?.id ?? null}
+            onConnectRemote={(id) => {
+              const profile = sshProfiles.find((p) => p.id === id) ?? null;
+              void handleModeSwitch(profile);
+            }}
+            onDisconnectRemote={() => void handleModeSwitch(null)}
           />
         }
         editorArea={
@@ -577,14 +710,19 @@ export default function AgentPage() {
             activeSessionId={activeSession.id}
             onSelectSession={(s) => { setActiveSession(s); setIsRunning(s.status === 'running'); }}
             onNewSession={() => handleNewSession('build')}
+            remoteProfileId={sshMode === 'remote' && activeSshProfile ? activeSshProfile.id : undefined}
           />
         }
         bottomPanelContent={
-          <TerminalView
-            sessionId={activeSession.id}
-            workspacePath={workspacePath}
-            className="h-full"
-          />
+          sshMode === 'remote' && activeSshProfile ? (
+            <RemoteTerminal profile={activeSshProfile} />
+          ) : (
+            <TerminalView
+              sessionId={activeSession.id}
+              workspacePath={workspacePath}
+              className="h-full"
+            />
+          )
         }
       />
       <QuickOpen

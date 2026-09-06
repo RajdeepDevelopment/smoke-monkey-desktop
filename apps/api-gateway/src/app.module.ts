@@ -27,6 +27,8 @@ import { AgentRun } from './modules/agent/entities/agent-run.entity';
 import { AgentMessage } from './modules/agent/entities/agent-message.entity';
 import { AgentFileChange } from './modules/agent/entities/agent-file-change.entity';
 import { AgentPermission } from './modules/agent/entities/agent-permission.entity';
+import { SshModule } from './modules/ssh/ssh.module';
+import { SshConnection } from './modules/ssh/entities/ssh-connection.entity';
 
 @Module({
   imports: [
@@ -36,7 +38,7 @@ import { AgentPermission } from './modules/agent/entities/agent-permission.entit
       inject: [ConfigService],
       useFactory: (config: ConfigService) =>
         buildTypeOrmOptions(config, {
-          entities: [User, DocumentEntity, Conversation, Message, UserApiKey, AgentSession, AgentRun, AgentMessage, AgentFileChange, AgentPermission],
+          entities: [User, DocumentEntity, Conversation, Message, UserApiKey, AgentSession, AgentRun, AgentMessage, AgentFileChange, AgentPermission, SshConnection],
         }),
     }),
     CommonModule,
@@ -52,6 +54,7 @@ import { AgentPermission } from './modules/agent/entities/agent-permission.entit
     AnalyticsModule,
     SettingsModule,
     AgentModule,
+    SshModule,
   ],
   providers: [
     {

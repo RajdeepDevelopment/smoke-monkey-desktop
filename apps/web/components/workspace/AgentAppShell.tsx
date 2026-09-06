@@ -8,6 +8,7 @@ import { SidePanel } from './SidePanel';
 import { TopBar } from './TopBar';
 import { BottomPanel } from './BottomPanel';
 import { GlobalNavDrawer } from './GlobalNavDrawer';
+import { StatusBar, type RemoteConnectionState } from './StatusBar';
 import { cn } from '../../lib/utils';
 
 interface AgentAppShellProps {
@@ -20,6 +21,10 @@ interface AgentAppShellProps {
   topBarActions?: ReactNode;
   isAgentRunning?: boolean;
   gitChangeCount?: number;
+  /** Remote-SSH connection state for the status bar. */
+  remote?: RemoteConnectionState;
+  /** Called with a profile id to connect, or null to disconnect (local). */
+  onRemoteChange?: (profileId: string | null) => void;
 }
 
 export function AgentAppShell({
@@ -32,36 +37,46 @@ export function AgentAppShell({
   topBarActions,
   isAgentRunning,
   gitChangeCount,
+  remote,
+  onRemoteChange,
 }: AgentAppShellProps) {
   const [navOpen, setNavOpen] = useState(false);
   return (
     <WorkspaceProvider>
       <WorkspaceShortcuts />
-      <div className="workspace-bg flex h-screen overflow-hidden">
-        {/* Activity Bar */}
-        <ActivityBar
-          isAgentRunning={isAgentRunning}
-          gitChangeCount={gitChangeCount}
-          onToggleGlobalNav={() => setNavOpen((v) => !v)}
-        />
+      <div className="workspace-bg flex h-screen flex-col overflow-hidden">
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          {/* Activity Bar */}
+          <ActivityBar
+            isAgentRunning={isAgentRunning}
+            gitChangeCount={gitChangeCount}
+            onToggleGlobalNav={() => setNavOpen((v) => !v)}
+          />
 
-        {/* Global sections sidebar — pushes content, never overlays */}
-        <GlobalNavDrawer open={navOpen} onClose={() => setNavOpen(false)} />
+          {/* Global sections sidebar — pushes content, never overlays */}
+          <GlobalNavDrawer open={navOpen} onClose={() => setNavOpen(false)} />
 
-        {/* Side Panel (Explorer/Search/SCM/Sessions) */}
-        <SidePanel>{sidePanelContent}</SidePanel>
+          {/* Side Panel (Explorer/Search/SCM/Sessions) */}
+          <SidePanel>{sidePanelContent}</SidePanel>
 
-        {/* Main Workspace */}
-        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          <TopBar workspacePath={workspacePath} breadcrumbs={breadcrumbs}>
-            {topBarActions}
-          </TopBar>
+          {/* Main Workspace */}
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+            <TopBar workspacePath={workspacePath} breadcrumbs={breadcrumbs}>
+              {topBarActions}
+            </TopBar>
 
-          <EditorAgentSplit editorArea={editorArea} agentPanel={agentPanel} />
+            <EditorAgentSplit editorArea={editorArea} agentPanel={agentPanel} />
 
-          {/* Bottom Panel (Terminal) */}
-          <BottomPanel>{bottomPanelContent}</BottomPanel>
+            {/* Bottom Panel (Terminal) */}
+            <BottomPanel>{bottomPanelContent}</BottomPanel>
+          </div>
         </div>
+
+        {/* Status Bar (full-width, VS Code style) */}
+        <StatusBar
+          remote={remote ?? { profile: null, connected: false, available: [] }}
+          onConnect={(id) => onRemoteChange?.(id)}
+        />
       </div>
     </WorkspaceProvider>
   );

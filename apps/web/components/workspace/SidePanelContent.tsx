@@ -9,8 +9,10 @@ import {
 import type { AgentSession } from '../../lib/agent-api';
 import type { GitStatusEntry, GitStatusResult } from '../../lib/ide-api';
 import { FileExplorer } from '../workspace/FileExplorer';
+import type { WorkspaceClient } from '../../lib/workspace-client';
 import { SearchPanel } from '../workspace/SearchPanel';
 import { SourceControlPanel } from '../workspace/SourceControlPanel';
+import { SshPanel } from '../ssh/SshPanel';
 import { useWorkspace } from '../../hooks/useWorkspace';
 import { cn } from '../../lib/utils';
 
@@ -54,6 +56,14 @@ interface SidePanelContentProps {
 
   onModelChange: (model: string) => void;
   onProviderChange: (provider: string) => void;
+  /** Optional mode-aware client for Remote-SSH; forwards to the file explorer. */
+  client?: WorkspaceClient;
+  /** Active remote (SSH) profile id, when the whole IDE is on a remote host. */
+  activeSshProfileId?: string | null;
+  /** Connect to a host — flips Explorer/Agent/terminal to remote. */
+  onConnectRemote?: (profileId: string) => void;
+  /** Disconnect back to local workspace. */
+  onDisconnectRemote?: () => void;
 }
 
 function fmtDate(iso: string): string {
@@ -153,6 +163,10 @@ export function SidePanelContent({
   onOpenGitDiff,
   onModelChange,
   onProviderChange,
+  client,
+  activeSshProfileId,
+  onConnectRemote,
+  onDisconnectRemote,
 }: SidePanelContentProps) {
   const { state, setActivePanel, expandBottomPanel } = useWorkspace();
   const [showNewSession, setShowNewSession] = useState(false);
@@ -199,9 +213,11 @@ export function SidePanelContent({
             <button onClick={onRefreshFileTree} className="glass-hover rounded p-1 text-ink-muted transition-colors hover:text-foreground" title="Refresh Explorer">
               <RefreshCw className={cn('h-3 w-3', fileTreeLoading && 'animate-spin')} />
             </button>
-            <button onClick={onOpenFolder} className="glass-hover rounded p-1 text-ink-muted transition-colors hover:text-foreground" title="Open Folder">
-              <FolderDown className="h-3 w-3" />
-            </button>
+            {!client?.isRemote() && (
+              <button onClick={onOpenFolder} className="glass-hover rounded p-1 text-ink-muted transition-colors hover:text-foreground" title="Open Folder">
+                <FolderDown className="h-3 w-3" />
+              </button>
+            )}
           </PanelHeader>
           <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
             <FileExplorer
@@ -215,6 +231,7 @@ export function SidePanelContent({
               onOpenGitDiff={onOpenGitDiff}
               onRefresh={onRefreshFileTree}
               loading={fileTreeLoading}
+              client={client}
               className="py-1"
             />
           </div>
@@ -316,6 +333,20 @@ export function SidePanelContent({
                 <p className="text-[10px]">No sessions match “{sessionSearch}”</p>
               </div>
             )}
+          </div>
+        </>
+      )}
+
+      {/* ── SSH ──────────────────────────────────────────────────── */}
+      {state.activePanel === 'ssh' && (
+        <>
+          <PanelHeader title="SSH" />
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <SshPanel className="h-full"
+              activeProfileId={activeSshProfileId}
+              onConnect={(p) => onConnectRemote?.(p.id)}
+              onDisconnect={onDisconnectRemote}
+            />
           </div>
         </>
       )}

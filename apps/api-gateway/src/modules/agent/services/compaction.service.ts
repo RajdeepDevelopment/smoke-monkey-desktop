@@ -4,12 +4,12 @@ import { AgentSessionService } from './agent-session.service';
 import { ApiKeysService } from '../../keys/api-keys.service';
 import {
   CHARS_PER_TOKEN,
-  CONTEXT_TOKEN_BUDGET,
   COMPACTION_THRESHOLD,
   KEEP_RECENT_MESSAGES,
   LLMMessage,
   ContextSnapshot,
   estimateTokens,
+  resolveTokenBudget,
 } from './run-context';
 
 interface CompactionResult {
@@ -45,7 +45,7 @@ export class ContextCompactionService {
     const messages = await this.messageService.findBySession(sessionId, 500);
     const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
     const estimatedTokens = Math.ceil(totalChars / CHARS_PER_TOKEN);
-    const threshold = CONTEXT_TOKEN_BUDGET * COMPACTION_THRESHOLD;
+    const threshold = resolveTokenBudget() * COMPACTION_THRESHOLD;
 
     this.logger.debug(`Session ${sessionId}: ~${estimatedTokens} tokens (threshold: ${threshold})`);
     return estimatedTokens > threshold;
@@ -63,7 +63,7 @@ export class ContextCompactionService {
     const totalChars = messages.reduce((sum, m) => sum + m.content.length, 0);
     const estimatedTokens = Math.ceil(totalChars / CHARS_PER_TOKEN);
 
-    if (estimatedTokens <= CONTEXT_TOKEN_BUDGET * COMPACTION_THRESHOLD) {
+    if (estimatedTokens <= resolveTokenBudget(provider, model) * COMPACTION_THRESHOLD) {
       return null;
     }
 
@@ -137,7 +137,7 @@ export class ContextCompactionService {
     const { sessionId, messages, provider, model, userId } = opts;
 
     const estimated = estimateTokens(messages);
-    if (estimated <= CONTEXT_TOKEN_BUDGET * COMPACTION_THRESHOLD) return null;
+    if (estimated <= resolveTokenBudget(provider, model) * COMPACTION_THRESHOLD) return null;
     if (messages.length < KEEP_RECENT_MESSAGES + 4) return null;
 
     const cut = findSafeCutIndex(messages, KEEP_RECENT_MESSAGES);
@@ -256,6 +256,10 @@ SUMMARY:`;
         const geminiKey = userKey || process.env.GEMINI_API_KEY || '';
         if (geminiKey) headers['Authorization'] = `Bearer ${geminiKey}`;
         url = `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`;
+      } else if (provider === 'opencode') {
+        const ocKey = userKey || process.env.OPENCODE_API_KEY || apiKey;
+        if (ocKey) headers['Authorization'] = `Bearer ${ocKey}`;
+        url = `https://opencode.ai/zen/v1/chat/completions`;
       } else if (provider === 'ollama' || !provider) {
         url = `${baseUrl}/api/chat`;
         if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;

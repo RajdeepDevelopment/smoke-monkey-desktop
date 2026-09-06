@@ -47,7 +47,7 @@ export function getTodoWriteTool(): ToolDefinition {
     },
     execute: async (
       input: Record<string, unknown>,
-      _context: ToolContext
+      context: ToolContext
     ): Promise<ToolResult> => {
       const raw = input.todos as Array<{
         content: string;
@@ -86,6 +86,11 @@ export function getTodoWriteTool(): ToolDefinition {
 
       if (todos.length === 0) {
         return { content: [{ type: 'text', text: 'Todo list cleared.' }] };
+      }
+
+      // Emit structured todo.updated event for UI rendering
+      if (context.eventEmitter) {
+        context.eventEmitter.emitTodoUpdated(context.sessionId, context.runId, todos);
       }
 
       const counts = (s: string) => todos.filter(t => t.status === s).length;

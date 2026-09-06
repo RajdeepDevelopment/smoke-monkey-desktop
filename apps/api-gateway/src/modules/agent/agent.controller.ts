@@ -18,6 +18,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import * as fs from 'fs';
+import { OPENCODE_ZEN_MODEL_IDS } from '../../common/constants/opencode-models';
 import * as path from 'path';
 
 const execAsync = promisify(exec);
@@ -70,7 +71,7 @@ export class AgentController {
   @Post('sessions/:id/run')
   async runAgent(
     @Param('id') sessionId: string,
-    @Body() body: { message: string; agentId?: AgentId; model?: string; provider?: string; workspacePath?: string },
+    @Body() body: { message: string; agentId?: AgentId; model?: string; provider?: string; workspacePath?: string; remoteProfileId?: string },
     @Req() req: any,
   ) {
     const userId = req.user?.id || req.userId;
@@ -87,6 +88,7 @@ export class AgentController {
       agentId: body.agentId || session.agentId,
       model: body.model,
       provider: body.provider,
+      remoteProfileId: body.remoteProfileId,
     };
 
     this.agentService.run(request).catch((err) => {
@@ -247,6 +249,9 @@ export class AgentController {
             'openai/gpt-5.6-luna-pro',
             'openai/gpt-5.6-luna',
             'google/gemini-3.7-flash',
+            'google/gemini-3.6-flash',
+            'google/gemini-3.5-flash',
+            'google/gemini-3.5-flash-lite',
             'x-ai/grok-4.6',
             'qwen/qwen3-coder',
             'deepseek/deepseek-v4-pro',
@@ -283,7 +288,15 @@ export class AgentController {
           label: 'Google Gemini',
           models: [
             'gemini-3.7-flash',
+            'gemini-3.6-flash',
+            'gemini-3.5-flash',
+            'gemini-3.5-flash-lite',
           ],
+        },
+        {
+          id: 'opencode',
+          label: 'OpenCode Zen',
+          models: OPENCODE_ZEN_MODEL_IDS,
         },
         {
           id: 'ollama',

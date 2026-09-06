@@ -44,6 +44,8 @@ export interface ToolCallJson {
   toolName: string;
   arguments: unknown;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  /** Gemini 3.x thinking models: echoed back on the assistant tool_call. */
+  thought_signature?: string;
   output?: string;
   result?: unknown;
   error?: string;

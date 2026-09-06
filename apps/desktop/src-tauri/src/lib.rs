@@ -50,43 +50,54 @@ struct ProxyResponse {
 }
 
 #[tauri::command]
-fn proxy_fetch(req: ProxyRequest) -> Result<ProxyResponse, String> {
-    let path = req.url.trim_start_matches('/');
+async fn proxy_fetch(req: ProxyRequest) -> Result<ProxyResponse, String> {
+    let path = req.url.trim_start_matches('/').to_string();
     let method = req.method.to_uppercase();
-    let body_bytes = req.body.as_deref().unwrap_or("");
-
-    let mut stream = connect_api()?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(60)))
-        .ok();
+    let body_bytes = req.body.unwrap_or_default();
 
     let mut header_str = String::new();
     for (k, v) in &req.headers {
         header_str.push_str(&format!("{}: {}\r\n", k, v));
     }
 
-    let raw = format!(
-        "{} /{} HTTP/1.1\r\nHost: localhost:{API_PORT}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-        method, path, header_str, body_bytes.len(), body_bytes
-    );
+    // The actual HTTP round-trip is blocking I/O (connect + read the full
+    // body). Running it on a worker thread keeps the main thread — and the
+    // webview/UI — fully responsive, so a slow SSH-backed endpoint can no
+    // longer freeze the Mac. Previously this was a sync command that did
+    // blocking reads directly on the main thread, which hung the whole app.
+    let join = tauri::async_runtime::spawn_blocking(move || -> Result<ProxyResponse, String> {
+        let mut stream = connect_api()?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .ok();
 
-    stream
-        .write_all(raw.as_bytes())
-        .map_err(|e| format!("Write failed: {}", e))?;
+        let raw = format!(
+            "{} /{} HTTP/1.1\r\nHost: localhost:{API_PORT}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+            method, path, header_str, body_bytes.len(), body_bytes
+        );
 
-    let mut resp = Vec::new();
-    stream
-        .read_to_end(&mut resp)
-        .map_err(|e| format!("Read failed: {}", e))?;
+        stream
+            .write_all(raw.as_bytes())
+            .map_err(|e| format!("Write failed: {}", e))?;
 
-    let resp_str = String::from_utf8_lossy(&resp);
-    let (status, resp_headers, body) = parse_http_response(&resp_str);
+        let mut resp = Vec::new();
+        stream
+            .read_to_end(&mut resp)
+            .map_err(|e| format!("Read failed: {}", e))?;
 
-    Ok(ProxyResponse {
-        status,
-        headers: resp_headers,
-        body,
+        let resp_str = String::from_utf8_lossy(&resp);
+        let (status, resp_headers, body) = parse_http_response(&resp_str);
+
+        Ok(ProxyResponse {
+            status,
+            headers: resp_headers,
+            body,
+        })
     })
+    .await
+    .map_err(|e| format!("Proxy fetch task failed: {}", e))??;
+
+    Ok(join)
 }
 
 fn parse_http_response(raw: &str) -> (u16, HashMap<String, String>, String) {

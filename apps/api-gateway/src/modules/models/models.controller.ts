@@ -1,4 +1,5 @@
 import { Controller, Get, Logger } from '@nestjs/common';
+import { OPENCODE_ZEN_MODEL_IDS, OPENCODE_ZEN_MODELS } from '../../common/constants/opencode-models';
 
 const FALLBACK_MODELS_RESPONSE = {
   providers: [
@@ -10,6 +11,9 @@ const FALLBACK_MODELS_RESPONSE = {
         'deepseek/deepseek-v4-pro',
         'z-ai/glm-5.2',
         'google/gemini-3.7-flash',
+        'google/gemini-3.6-flash',
+        'google/gemini-3.5-flash',
+        'google/gemini-3.5-flash-lite',
         'x-ai/grok-4.6',
         'anthropic/claude-sonnet-4',
         'anthropic/claude-opus-4',
@@ -50,7 +54,7 @@ const FALLBACK_MODELS_RESPONSE = {
     {
       id: 'gemini',
       label: 'Google Gemini',
-      models: ['gemini-3.7-flash', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'],
+      models: ['gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite'],
     },
     {
       id: 'ollama',
@@ -59,8 +63,8 @@ const FALLBACK_MODELS_RESPONSE = {
     },
     {
       id: 'opencode',
-      label: 'OpenCode Zen (free)',
-      models: ['deepseek-v4-flash-free', 'nemotron-3-ultra-free', 'mimo-v2.5-free', 'big-pickle', 'laguna-s-2.1-free'],
+      label: 'OpenCode Zen',
+      models: OPENCODE_ZEN_MODEL_IDS,
     },
     {
       id: 'omniroute',
@@ -82,6 +86,9 @@ const FALLBACK_MODELS_RESPONSE = {
       { name: 'DeepSeek V4 Pro', id: 'deepseek/deepseek-v4-pro', provider: 'openrouter', notes: 'Deep analysis and multi-step logic' },
       { name: 'GLM 5.2', id: 'z-ai/glm-5.2', provider: 'openrouter', notes: 'Strong at code and tool-calling' },
       { name: 'Gemini 3.7 Flash', id: 'google/gemini-3.7-flash', provider: 'openrouter', notes: 'Flagship Gemini — strong all-round RAG' },
+      { name: 'Gemini 3.6 Flash', id: 'google/gemini-3.6-flash', provider: 'openrouter', notes: 'Previous-gen Flash — solid balance of speed and capability' },
+      { name: 'Gemini 3.5 Flash', id: 'google/gemini-3.5-flash', provider: 'openrouter', notes: 'Cost-effective agentic Flash model' },
+      { name: 'Gemini 3.5 Flash-Lite', id: 'google/gemini-3.5-flash-lite', provider: 'openrouter', notes: 'Fastest, most cost-effective Gemini' },
       { name: 'Grok 4.6', id: 'x-ai/grok-4.6', provider: 'openrouter', notes: 'Fast, sharp reasoning' },
       { name: 'Claude Sonnet 4', id: 'anthropic/claude-sonnet-4', provider: 'openrouter', notes: 'Balanced quality and speed' },
       { name: 'Claude Opus 4', id: 'anthropic/claude-opus-4', provider: 'openrouter', notes: 'Maximum quality reasoning' },
@@ -95,7 +102,16 @@ const FALLBACK_MODELS_RESPONSE = {
       { name: 'o4-mini', id: 'o4-mini', provider: 'openai', notes: 'Fast reasoning model' },
       { name: 'Grok 4.6 (Direct)', id: 'grok-4.6', provider: 'xai', notes: 'Direct xAI endpoint' },
       { name: 'Gemini 3.7 Flash (Direct)', id: 'gemini-3.7-flash', provider: 'gemini', notes: 'Direct Google AI Studio' },
-      { name: 'Gemini 2.5 Pro', id: 'gemini-2.5-pro', provider: 'gemini', notes: 'Google Gemini Pro' },
+      { name: 'Gemini 3.6 Flash (Direct)', id: 'gemini-3.6-flash', provider: 'gemini', notes: 'Direct Google AI Studio' },
+      { name: 'Gemini 3.5 Flash (Direct)', id: 'gemini-3.5-flash', provider: 'gemini', notes: 'Direct Google AI Studio' },
+      { name: 'Gemini 3.5 Flash-Lite (Direct)', id: 'gemini-3.5-flash-lite', provider: 'gemini', notes: 'Direct Google AI Studio' },
+      ...OPENCODE_ZEN_MODELS.map((m) => ({
+        name: m.name,
+        id: m.id,
+        provider: 'opencode',
+        isFree: m.isFree,
+        notes: m.isFree ? 'OpenCode Zen — free' : 'OpenCode Zen — recommended coding-agent model',
+      })),
     ],
     embeddingModels: [
       { name: 'Nemotron Embed 1B', id: 'nvidia/nemotron-3-embed-1b', provider: 'openrouter', dims: 2048, notes: '2048-dim, 32768 context — the active index model' },

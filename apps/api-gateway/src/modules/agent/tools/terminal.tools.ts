@@ -8,6 +8,7 @@ import { promisify } from 'util';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
+import { ConnectorRegistry } from '../../ssh/connector.registry';
 
 const execAsync = promisify(exec);
 
@@ -113,37 +114,87 @@ const SPAWN_CAPTURE_CAP = 4 * 1024 * 1024;
  * in-memory (keeping the tail), so huge outputs never kill the process the
  * way exec's maxBuffer does. Timeout sends SIGTERM, then SIGKILL after a
  * 5s grace period.
+ *
+ * When `onStream` is provided, each accumulated stdout/stderr snapshot is
+ * handed to it as it arrives so the frontend can render terminal output
+ * LIVE (streaming) instead of only after the process exits. The snapshots
+ * are cumulative on PURPOSE — the UI tool card replaces on each tool.output,
+ * so a cumulative buffer grows naturally and the final one matches the
+ * completion emit exactly (no duplication).
  */
 async function runForeground(
   command: string,
   cwd: string,
   env: Record<string, string | undefined>,
   timeoutMs: number,
+  onStream?: (header: string, stdout: string, stderr: string) => void,
 ): Promise<ShellOutcome & { captureTruncated: boolean; spawnError?: string }> {
   const { spawn } = await import('child_process');
-  return new Promise((resolve) => {
-    const child = spawn('/bin/sh', ['-c', command], { cwd, env });
+  const child = spawn('/bin/sh', ['-c', command], {
+    cwd,
+    env,
+    // stdin is a PIPE we auto-feed: interactive confirmations (e.g. shadcn's
+    // "File already exists. Overwrite? (y/N)" or npx's "Ok to proceed?") are
+    // answered with "yes" on an interval so the command proceeds deterministically
+    // instead of blocking forever on an open pipe. "y" is fed so overwrite/install
+    // prompts default to PROCEED (matching the agent's intent to get the work done).
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
 
+  // Auto-answer stdin prompts until the child exits or its stdin closes.
+  const stdinFeeder = setInterval(() => {
+    try {
+      if (child.stdin.destroyed || !child.stdin.writable) {
+        clearInterval(stdinFeeder);
+        return;
+      }
+      child.stdin.write('y\n');
+    } catch {
+      clearInterval(stdinFeeder);
+    }
+  }, 150);
+  child.once('exit', () => clearInterval(stdinFeeder));
+  child.once('error', () => clearInterval(stdinFeeder));
+
+  return new Promise((resolve) => {
     let stdoutBuf = Buffer.alloc(0);
     let stderrBuf = Buffer.alloc(0);
     let captureTruncated = false;
+    // Hard cap on how much we push to the live stream at once so a chatty
+    // process can't flood the event bus before the model even sees output.
+    let streamedSnapshots = 0;
+    const STREAM_SNAPSHOT_MAX_CHARS = 8_000;
+
+    const emitStream = () => {
+      if (!onStream) return;
+      if (streamedSnapshots++ >= 200) return; // don't stream forever
+      onStream(
+        captureTruncated ? '[output truncated — showing tail]\n' : '',
+        stdoutBuf.toString('utf-8'),
+        stderrBuf.toString('utf-8'),
+      );
+    };
 
     const attach = (stream: NodeJS.ReadableStream | null, isStdout: boolean) => {
       stream?.on('data', (chunk: Buffer) => {
         const target = () => (isStdout ? stdoutBuf : stderrBuf);
         if (target().length >= SPAWN_CAPTURE_CAP) {
           captureTruncated = true;
-          return; // consume but don't store
-        }
-        const merged = Buffer.concat([target(), chunk]);
-        if (merged.length > SPAWN_CAPTURE_CAP) {
-          captureTruncated = true;
-          const kept = merged.subarray(merged.length - SPAWN_CAPTURE_CAP);
-          if (isStdout) stdoutBuf = kept; else stderrBuf = kept;
-        } else if (isStdout) {
-          stdoutBuf = merged;
         } else {
-          stderrBuf = merged;
+          const merged = Buffer.concat([target(), chunk]);
+          if (merged.length > SPAWN_CAPTURE_CAP) {
+            captureTruncated = true;
+            const kept = merged.subarray(merged.length - SPAWN_CAPTURE_CAP);
+            if (isStdout) stdoutBuf = kept; else stderrBuf = kept;
+          } else if (isStdout) {
+            stdoutBuf = merged;
+          } else {
+            stderrBuf = merged;
+          }
+        }
+        // Only stream snapshots below the char cap to keep it lightweight.
+        if (stdoutBuf.length + stderrBuf.length <= STREAM_SNAPSHOT_MAX_CHARS) {
+          emitStream();
         }
       });
     };
@@ -180,6 +231,14 @@ async function runForeground(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      // Final flush so any trailing buffered output reaches the UI.
+      if (onStream && (stdoutBuf.length || stderrBuf.length)) {
+        onStream(
+          captureTruncated ? '[output truncated — showing tail]\n' : '',
+          stdoutBuf.toString('utf-8'),
+          stderrBuf.toString('utf-8'),
+        );
+      }
       resolve({
         stdout: stdoutBuf.toString('utf-8'),
         stderr: stderrBuf.toString('utf-8'),
@@ -191,6 +250,30 @@ async function runForeground(
       });
     });
   });
+}
+
+/**
+ * Builds the live-streaming callback for the terminal tools. Emits a
+ * tool.output for each accumulated snapshot so the frontend terminal card
+ * updates in real time while the command is still running.
+ */
+function buildStreamCallback(context: ToolContext): ((header: string, stdout: string, stderr: string) => void) | undefined {
+  if (!context.eventEmitter || !context.toolCallId) return undefined;
+  return (header, stdout, stderr) => {
+    let body = header;
+    if (stdout) body += stdout;
+    if (stderr.trim().length > 0) {
+      if (body.length > 0 && !body.endsWith('\n')) body += '\n';
+      body += `[stderr]\n${stderr}`;
+    }
+    if (!body.trim()) return;
+    context.eventEmitter!.emitToolOutput(
+      context.sessionId,
+      context.runId,
+      context.toolCallId!,
+      body,
+    );
+  };
 }
 
 // Ensure nvm/fnm/volta node paths are available in non-interactive shells
@@ -229,6 +312,11 @@ function buildEnv(userEnv?: Record<string, string>): Record<string, string> {
     PATH: enhancedPath,
     TERM: 'dumb',
     FORCE_COLOR: '0',
+    // Many CLIs (shadcn, npm, npx, create-* scaffolds) drop interactive
+    // confirmations when CI is set, so the agent's command proceeds
+    // deterministically instead of waiting on an unanswerable prompt. The
+    // caller's explicit env still takes precedence if it overrides CI.
+    CI: 'true',
     ...(userEnv || {}),
   };
 }
@@ -278,18 +366,76 @@ function detectWarnings(command: string, workdir: string): string[] {
   return warnings;
 }
 
-export function getRunCommandTool(): ToolDefinition {
+/**
+ * Smart process-protection guard. Prevents the agent from killing its own
+ * host and critical infrastructure — a `kill -9` on the api-gateway's own
+ * PID severs the run mid-flight and leaves the agent stuck in RUNNING (this
+ * is exactly what happened when a run issued "kill -9 <api-gateway-pid>"
+ * and killed the very server executing it).
+ *
+ * Returns a hard-block error message (isError) so the run stops gracefully
+ * instead of hanging, or `null` if the command is safe to run.
+ */
+const KILL_CMD_RE = /\b(kill|pkill|killall)\b/;
+const KILL_FORCE_RE = /\b(kill\s+-\s*9|pkill\s+-\s*9|killall\s+-\s*9|kill\s+-9)\b/;
+const PROTECTED_PROCESS_NAMES = [
+  'node', 'npm', 'pnpm', 'yarn', 'bun',
+  'postgres', 'redis', 'mysql', 'mariadb', 'mongod', 'sqlite3',
+  'nginx', 'supervisord', 'ssh', 'docker', 'containerd',
+];
+
+function detectBlockedProcessKill(command: string): string | null {
+  const trimmed = command.trim();
+  if (!KILL_CMD_RE.test(trimmed)) return null;
+
+  const selfPid = String(process.pid);
+  const selfPidRe = new RegExp(`(?:^|\\W)${selfPid}(?:\\W|$)`);
+
+  // 1. The command targets the agent's own server process (api-gateway).
+  if (selfPidRe.test(trimmed)) {
+    return `Blocked: this command would kill the agent's own server process (PID ${selfPid}). ` +
+      'Killing the api-gateway severs the agent mid-run and leaves it stuck in RUNNING. ' +
+      'If a service needs restarting, kill only the specific child process you started (use lsof/ps to find it), then relaunch it.';
+  }
+
+  // 2. Bulk kills of a protected infrastructure/language runtime name.
+  const lower = trimmed.toLowerCase();
+  const bulkKill = /\b(pkill|killall)\b/.test(lower);
+  if (bulkKill) {
+    for (const name of PROTECTED_PROCESS_NAMES) {
+      const nameRe = new RegExp(`(?:^|\\W)${name}(?:\\W|$)`, 'i');
+      if (nameRe.test(lower)) {
+        return `Blocked: refusing to pkill/killall "${name}" — that would take down critical infrastructure ` +
+          `(the language runtime, the api-gateway, or a database). Use a targeted PID kill for the specific stray process instead ` +
+          `(e.g. lsof -nP -iTCP:<port> to find it, then kill <that-pid>).`;
+      }
+    }
+  }
+
+  // 3. SIGKILL (-9) always — flag a strong warning (soft, not blocked) so the
+  //    agent prefers a graceful SIGTERM first.
+  if (KILL_FORCE_RE.test(trimmed)) {
+    return `Warning: forcing SIGKILL (-9). Prefer a graceful kill (SIGTERM: "kill <pid>") first so the process can clean up, `
+      + 'and never apply -9 to the api-gateway or any critical service.';
+  }
+
+  return null;
+}
+
+export function getRunCommandTool(connectors?: ConnectorRegistry): ToolDefinition {
   return {
     name: 'run_command',
     description:
-      'Execute a shell command (`sh -c`) and return its stdout/stderr. ' +
+      'Execute a shell command in the workspace. THIS is your primary engineering tool — use it for discovery, search, scripts, tests, builds, git, logs, processes, and HTTP/API checks. ' +
+      'Prefer ONE combined command for related operations instead of many tiny calls: chain related read-only steps with && (or ; for independent checks) in a single execution, e.g. "pwd && git status --short && git diff --stat" or "rg -n \"Auth|login\" src && pnpm exec tsc --noEmit". Use rg/fd for search, git for repository state, jq for JSON, package-manager commands for validation, and curl/log/process commands for runtime verification. ' +
       'Each call runs in a fresh shell: no state (cwd, variables) persists between calls — pass workdir instead of using cd. ' +
-      'Non-zero exits are reported as an [exit code: N] marker (data, not a tool failure): always check it and investigate failures before moving on. ' +
+      'Non-zero exits are reported as an [exit code: N] marker (data, not a tool failure): always check it and diagnose the root cause before retrying — never blindly repeat a failed command. ' +
       'Long output keeps the tail; the full output is saved to a file whose path is reported when truncated. ' +
-      'Avoid interactive commands (vim, git rebase -i, etc.) — use non-interactive alternatives. ' +
-      'IMPORTANT: For long-running processes (servers, watchers), set background=true so the command runs detached and does NOT block. ' +
-      'You MUST use background=true for commands like "node server.js", "npm run dev", "python app.py", or any server process. ' +
-      'Foreground blocking servers will time out.',
+      'Commands must be non-interactive and must not wait on stdin: use the tool\'s own flag for init/add/install CLIs (-y, --yes, --force, --no-input or env CI=true, e.g. "CI=true npx --yes shadcn@latest add button -y"). ' +
+      'For long-running processes (servers, watchers) you MUST set background=true so the command runs detached and does not block; output streams LIVE to the UI. After starting one, run "sleep 2 && tail -30 <log>" to verify it actually started. ' +
+      'Set an explicit timeout for potentially long commands (e.g. timeout=300000 for builds/tests) so a hung command is killed by SIGTERM instead of blocking forever; every command is auto-killed at its timeout. ' +
+      'NEVER kill the api-gateway or critical infrastructure: killing the server that is running you (e.g. a bare "kill -9 <pid>" that targets the api-gateway, or pkill/killall on node/postgres/redis) severs the run and is blocked. To stop a process you started, first find it via lsof -nP -iTCP:<port> or ps, then kill only that specific child PID with a graceful SIGTERM first. ' +
+      'Do not use this tool for destructive operations (git reset --hard, git clean -fd, rm -rf, destructive SQL) unless the user explicitly authorized them.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -340,6 +486,16 @@ export function getRunCommandTool(): ToolDefinition {
 
       const warnings = detectWarnings(command, workdir);
 
+      // Smart process-protection guard: block self/infra kills (hard error)
+      // and surface SIGKILL usage as a warning, so a rogue "kill -9" on the
+      // api-gateway can never sever the run and wedge the agent in RUNNING.
+      const killGuard = detectBlockedProcessKill(command);
+      const HARD_KILL_BLOCK_MARKER = 'Blocked: this command would kill the agent\'s own server process';
+      if (killGuard && (killGuard.startsWith(HARD_KILL_BLOCK_MARKER) || killGuard.startsWith('Blocked: refusing to'))) {
+        return { content: [{ type: 'text', text: killGuard }], isError: true };
+      }
+      if (killGuard) warnings.push(killGuard);
+
       if (background) {
         const { spawn } = await import('child_process');
         // Keep logs OUT of the workspace: they would pollute search/glob results.
@@ -366,6 +522,35 @@ export function getRunCommandTool(): ToolDefinition {
 
           const pid = stdout.trim().split('\n').pop()?.trim() || 'unknown';
 
+          // Start a background watcher that streams log output to the frontend
+          if (context.eventEmitter) {
+            const toolCallIdForEvents = context.toolCallId;
+            let lastSize = 0;
+            const watcher = fs.watch(bgLog, async () => {
+              try {
+                const stat = fs.statSync(bgLog);
+                if (stat.size > lastSize) {
+                  const stream = fs.createReadStream(bgLog, { start: lastSize, encoding: 'utf-8' });
+                  let newContent = '';
+                  for await (const chunk of stream) {
+                    newContent += chunk;
+                  }
+                  lastSize = stat.size;
+                  if (newContent.trim() && toolCallIdForEvents) {
+                    context.eventEmitter!.emitToolOutput(
+                      context.sessionId,
+                      context.runId,
+                      toolCallIdForEvents,
+                      newContent.trim(),
+                    );
+                  }
+                }
+              } catch {}
+            });
+            // Auto-stop watching after 5 minutes
+            setTimeout(() => { watcher.close(); }, 5 * 60 * 1000);
+          }
+
           const parts: string[] = [];
           if (warnings.length > 0) {
             parts.push('Warnings:\n' + warnings.map(w => '  ' + w).join('\n'));
@@ -388,8 +573,48 @@ export function getRunCommandTool(): ToolDefinition {
         }
       }
 
+      // Remote execution over SSH (Remote-SSH mode): the command runs on the
+      // remote host's default login shell. Live output streams to the UI.
+      if (context.remoteSsh && connectors) {
+        const ssh = connectors.get('ssh');
+        if (!ssh) {
+          return { content: [{ type: 'text', text: 'Error: SSH connector unavailable.' }], isError: true };
+        }
+        if (background) {
+          return {
+            content: [{ type: 'text', text: 'Remote execution does not support background mode; re-run without background=true (the command will block like a normal foreground command on the remote host).' }],
+            isError: true,
+          };
+        }
+        try {
+          const r = await ssh.exec(
+            context.remoteSsh.destinationId,
+            context.remoteSsh.userId,
+            command,
+            {
+              timeoutMs: timeout,
+              onStream: buildStreamCallback(context),
+              env: input.env as Record<string, string> | undefined,
+            },
+          );
+          return renderShellOutcome({
+            stdout: r.stdout,
+            stderr: r.stderr,
+            exitCode: r.exitCode,
+            timedOut: !!r.timedOut,
+            timeoutMs: timeout,
+          }, warnings);
+        } catch (err: any) {
+          return {
+            content: [{ type: 'text', text: `[ssh error] ${err?.message || String(err)}\n\nCommand: ${command}` }],
+            isError: true,
+          };
+        }
+      }
+
       // Foreground execution — exit-as-data: only spawn-level failures are isError.
-      const outcome = await runForeground(command, workdir, buildEnv(input.env as Record<string, string> | undefined), timeout);
+      const streamCb = buildStreamCallback(context);
+      const outcome = await runForeground(command, workdir, buildEnv(input.env as Record<string, string> | undefined), timeout, streamCb);
       if (outcome.spawnError) {
         return {
           content: [{ type: 'text', text: `Error: could not execute command: ${outcome.spawnError}\n\nCommand: ${command}` }],
@@ -454,7 +679,13 @@ export function getRunTestTool(): ToolDefinition {
 
       // Same spawn-based runner as run_command: tail-kept capture, SIGTERM→
       // SIGKILL timeout, no maxBuffer blowups on chatty test suites.
-      const outcome = await runForeground(command, workdir, buildEnv({ CI: 'true' }), timeout);
+      const outcome = await runForeground(
+        command,
+        workdir,
+        buildEnv({ CI: 'true' }),
+        timeout,
+        buildStreamCallback(context),
+      );
       if (outcome.spawnError) {
         return {
           content: [{ type: 'text', text: `Error: could not execute test command: ${outcome.spawnError}` }],

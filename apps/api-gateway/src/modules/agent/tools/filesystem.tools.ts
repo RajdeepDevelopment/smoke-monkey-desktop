@@ -621,6 +621,132 @@ export function getEditFileTool(): ToolDefinition {
   };
 }
 
+/**
+ * A `replacement` may carry the line-number prefixes JSON-serialization can't
+ * (e.g. the model pastes read_file output verbatim). Strip them defensively,
+ * same as edit_file does for oldString/newString.
+ */
+function stripLineNumbers(text: string): string {
+  return stripLineNumberPrefixes(text);
+}
+
+export function getReplaceLinesTool(): ToolDefinition {
+  return {
+    name: 'replace_lines',
+    description:
+      'Replace a contiguous line range in a file with new content, using 1-based line numbers ' +
+      'straight from read_file output. FASTER and far more token-efficient than edit_file: you do ' +
+      'NOT need to reproduce the exact old text — just say which lines to remove (' +
+      'startLine..endLine, inclusive) and what to put in their place. Everything outside the range ' +
+      'is left untouched. Use startLine=endLine to replace a single line; pass an empty replacement ' +
+      'to delete the range. The file must have been read this session before you can replace in it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'File path to edit. Relative paths resolve from the workspace root.',
+        },
+        startLine: {
+          type: 'number',
+          description: '1-based line number of the first line to replace (inclusive).',
+          minimum: 1,
+        },
+        endLine: {
+          type: 'number',
+          description:
+            '1-based line number of the last line to replace (inclusive). Default: startLine (replace a single line).',
+          minimum: 1,
+        },
+        replacement: {
+          type: 'string',
+          description:
+            'New text to place where the range was. Lines are used as-is; set your own indentation. ' +
+            'Use an empty string to delete the range entirely.',
+        },
+      },
+      required: ['path', 'startLine', 'replacement'],
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
+    execute: async (
+      input: Record<string, unknown>,
+      context: ToolContext
+    ): Promise<ToolResult> => {
+      const filePath = String(input.path || '');
+      const startLine = Math.max(1, Math.floor(Number(input.startLine) || 1));
+      const rawEnd = input.endLine != null ? Math.floor(Number(input.endLine)) : startLine;
+      const endLine = Math.max(startLine, rawEnd);
+      const replacement = input.replacement == null ? '' : stripLineNumbers(String(input.replacement));
+
+      if (!filePath) {
+        return { content: [{ type: 'text', text: 'Error: path is required.' }], isError: true };
+      }
+
+      const resolved = path.resolve(context.workspaceDir, filePath);
+      const gate = await assertObserved(context.sessionId, resolved, filePath);
+      if (gate) return gate;
+
+      try {
+        const content = await fs.readFile(resolved, 'utf-8');
+        const hasCrlf = content.includes('\r\n');
+        const eol = hasCrlf ? '\r\n' : '\n';
+        const lines = content.split(/\r\n|\n/);
+        // Drop the final empty element produced by a trailing newline, and track
+        // whether the file ended with a newline (we re-add it below).
+        const hadTrailingNewline = lines.length > 0 && lines[lines.length - 1] === '';
+        if (hadTrailingNewline) lines.pop();
+        const totalLines = lines.length;
+
+        if (startLine > totalLines) {
+          return {
+            content: [{ type: 'text', text: `Error: startLine ${startLine} is past the end of ${filePath} (${totalLines} lines). Adjust the range.` }],
+            isError: true,
+          };
+        }
+
+        const fromIdx = startLine - 1;
+        const endIdx = Math.min(endLine, totalLines) - 1; // inclusive index
+        const removed = lines.slice(fromIdx, endIdx + 1);
+        const replacementLines = replacement === '' ? [] : replacement.split(/\r\n|\n/);
+        const updatedLines = [
+          ...lines.slice(0, fromIdx),
+          ...replacementLines,
+          ...lines.slice(endIdx + 1),
+        ];
+        const updated = updatedLines.join(eol) + (hadTrailingNewline ? eol : '');
+
+        await fs.writeFile(resolved, updated, 'utf-8');
+        await observeRead(context.sessionId, resolved);
+
+        const crypto = await import('crypto');
+        const newHash = crypto.createHash('md5').update(updated).digest('hex').slice(0, 12);
+        const diffLines = [
+          ...removed.map((l) => '-' + l),
+          ...replacementLines.map((l) => '+' + l),
+        ].join('\n');
+
+        return {
+          content: [{
+            type: 'text',
+            text: `Replaced lines ${startLine}-${Math.min(endLine, totalLines)} in ${filePath}\nHASH: ${newHash}\n\`\`\`diff\n${diffLines}\n\`\`\``,
+          }],
+        };
+      } catch (err: any) {
+        if (err.code === 'ENOENT') {
+          return { content: [{ type: 'text', text: `Error: File not found: ${filePath}. Use write_file to create it.` }], isError: true };
+        }
+        if (err.code === 'EACCES') {
+          return { content: [{ type: 'text', text: `Error: Permission denied: ${filePath}` }], isError: true };
+        }
+        return { content: [{ type: 'text', text: `Error replacing lines in ${filePath}: ${err.message}` }], isError: true };
+      }
+    },
+  };
+}
+
 export function getApplyPatchTool(): ToolDefinition {
   return {
     name: 'apply_patch',

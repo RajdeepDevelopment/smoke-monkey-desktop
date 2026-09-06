@@ -84,6 +84,18 @@ export class AgentEventEmitter {
     this.emitRun(sessionId, runId, 'llm.thinking', { step });
   }
 
+  emitCompactionStarted(sessionId: string, runId: string, tokensBefore: number): void {
+    this.emitRun(sessionId, runId, 'compaction.started', { tokensBefore });
+  }
+
+  emitCompactionCompleted(
+    sessionId: string,
+    runId: string,
+    metrics: { tokensBefore: number; tokensAfter: number; tokensSaved: number; messagesCompacted: number },
+  ): void {
+    this.emitRun(sessionId, runId, 'compaction.completed', metrics);
+  }
+
   emitAskUserRequired(sessionId: string, runId: string, toolCallId: string, question: string, options: unknown[], multiple: boolean): void {
     this.emitRun(sessionId, runId, 'ask_user.required', { toolCallId, question, options, multiple });
   }
