@@ -6,16 +6,25 @@ import type {
   MetricsSummaryDto,
   ModelsResponseDto,
   OmniRouteModelsResponseDto,
+  OmniRouteStatusDto,
+  OnboardingStateDto,
   RetrieveResponseDto,
   UserKeyDto,
   UserKeysResponseDto,
   UserSettingsDto,
   SaveKeyResultDto,
+  SecretSummaryDto,
+  ListSecretsResponseDto,
+  SaveSecretResultDto,
+  HuggingFaceStatusDto,
   AgentSessionDto,
   AgentMessageDto,
   AgentRunDto,
   AgentEventDto,
   AgentToolDto,
+  McpServersResponseDto,
+  McpTestResultDto,
+  McpOAuthStartResultDto,
 } from '@rag/contracts';
 import { streamSse } from './sse';
 
@@ -223,6 +232,54 @@ async function nativeFetchStreaming(
   });
 }
 
+export interface AgentAsset {
+  ok: boolean;
+  name: string;
+  path: string;
+  mime: string;
+  size: number;
+  b64: string;
+}
+
+/** Fetch a generated agent asset (PDF/PPT/image/any file) as base64 through the
+ *  same transport the rest of the app uses (Tauri proxy in the desktop app,
+ *  plain fetch in the browser build) so file cards / image previews / downloads
+ *  work in both. */
+export async function fetchAgentAsset(filePath: string): Promise<AgentAsset> {
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers.authorization = `Bearer ${token}`;
+  const res = await nativeFetch(
+    `${API_URL}/api/agent/file/asset?path=${encodeURIComponent(filePath)}`,
+    { headers, credentials: 'include' },
+  );
+  if (!res.ok) throw new ApiError(`Asset load failed (${res.status})`, res.status);
+  const body = (await res.json()) as Partial<AgentAsset>;
+  if (!body?.ok || !body.b64) throw new Error('Asset not readable');
+  return body as AgentAsset;
+}
+
+/** Decode an agent asset to a Blob (browser-safe, works off base64). */
+export function agentAssetToBlob(asset: AgentAsset): Blob {
+  const bin = atob(asset.b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: asset.mime || 'application/octet-stream' });
+}
+
+/** Trigger a client-side download of an agent asset. */
+export function downloadAgentAsset(asset: AgentAsset): void {
+  const blob = agentAssetToBlob(asset);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = asset.name || 'asset';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -367,6 +424,9 @@ export const api = {
   fetchOmniRouteModels: () => request<OmniRouteModelsResponseDto>('/api/models/omniroute'),
   fetchOpenRouterModels: () => request<OmniRouteModelsResponseDto>('/api/models/openrouter'),
 
+  // OmniRoute provisioning lifecycle (drives the "Initializing OmniRoute…" UI)
+  fetchOmniRouteStatus: () => request<OmniRouteStatusDto>('/api/settings/omniroute/status'),
+
   // playground (retrieval only, no generation)
   playgroundRetrieve: (payload: {
     message: string;
@@ -408,6 +468,21 @@ export const api = {
       method: 'POST',
     }),
 
+  // Secret Manager — named encrypted secrets (Hugging Face token, …).
+  // Per user, AES-256-GCM on the server; values are never returned.
+  listSecrets: () => request<ListSecretsResponseDto>('/api/secrets'),
+  saveSecret: (name: string, value: string) =>
+    request<SaveSecretResultDto>(`/api/secrets/${name}`, {
+      method: 'PUT',
+      body: JSON.stringify({ value }),
+    }),
+  deleteSecret: (name: string) =>
+    request<{ status: string }>(`/api/secrets/${name}`, { method: 'DELETE' }),
+  testSecret: (name: string) =>
+    request<{ status: string }>(`/api/secrets/${name}/test`, { method: 'POST' }),
+  fetchHuggingFaceStatus: () =>
+    request<HuggingFaceStatusDto>('/api/secrets/huggingface/status'),
+
   // user feature settings (web search + OmniRoute opt-in)
   fetchSettings: () => request<UserSettingsDto>('/api/settings'),
   setWebSearchEnabled: (enabled: boolean) =>
@@ -420,6 +495,11 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
     }),
+
+  // first-run onboarding state
+  fetchOnboarding: () => request<OnboardingStateDto>('/api/settings/onboarding'),
+  setOnboardingCompleted: () =>
+    request<OnboardingStateDto>('/api/settings/onboarding', { method: 'PUT' }),
 
   // ── Agent ──────────────────────────────────────────────────────────────────
   agentCreateSession: (agentId?: string, workspacePath?: string, title?: string) =>
@@ -454,4 +534,26 @@ export const api = {
     return es;
   },
   agentGetTools: () => request<AgentToolDto[]>('/api/agent/tools'),
+
+  // ── MCP Servers ──────────────────────────────────────────────────────────
+  listMcpServers: () =>
+    request<McpServersResponseDto>('/api/mcp'),
+  createMcpServer: (data: { name: string; description?: string; transport?: 'stdio' | 'http'; command: string; args?: string[]; env?: Record<string, string>; url?: string }) =>
+    request<{ id: string; name: string }>('/api/mcp', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateMcpServer: (id: string, data: { name?: string; description?: string; transport?: 'stdio' | 'http'; command?: string; args?: string[]; env?: Record<string, string>; url?: string; enabled?: boolean }) =>
+    request<{ id: string; name: string }>(`/api/mcp/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  deleteMcpServer: (id: string) =>
+    request<{ status: string }>(`/api/mcp/${id}`, { method: 'DELETE' }),
+  testMcpServer: (id: string) =>
+    request<McpTestResultDto>(`/api/mcp/${id}/test`, { method: 'POST' }),
+  startMcpOAuth: (id: string) =>
+    request<McpOAuthStartResultDto>(`/api/mcp/${id}/oauth/start`, { method: 'POST' }),
+  disconnectMcpOAuth: (id: string) =>
+    request<{ status: string }>(`/api/mcp/${id}/oauth/disconnect`, { method: 'POST' }),
 };

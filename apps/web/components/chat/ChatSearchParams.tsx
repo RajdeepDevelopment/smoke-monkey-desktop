@@ -5,5 +5,11 @@ import { ChatPanel } from '../ChatPanel';
 
 export default function ChatSearchParams() {
   const searchParams = useSearchParams();
-  return <ChatPanel initialConversationId={searchParams.get('c') ?? undefined} />;
+  return (
+    <ChatPanel
+      initialConversationId={searchParams.get('c') ?? undefined}
+      initialProvider={searchParams.get('provider') ?? undefined}
+      initialModel={searchParams.get('model') ?? undefined}
+    />
+  );
 }

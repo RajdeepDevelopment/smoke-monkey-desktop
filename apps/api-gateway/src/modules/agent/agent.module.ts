@@ -21,29 +21,36 @@ import { AgentMessage } from './entities/agent-message.entity';
 import { AgentFileChange } from './entities/agent-file-change.entity';
 import { AgentPermission } from './entities/agent-permission.entity';
 import { ToolRegistry } from './tools/tool-registry';
-import { getReadFileTool, getWriteFileTool, getEditFileTool, getReplaceLinesTool, getApplyPatchTool, getDeleteFileTool, getListDirectoryTool } from './tools/filesystem.tools';
+import { getReadFileTool, getWriteFileTool, getEditFileTool, getLineEditTool, getReplaceLinesTool, getApplyPatchTool, getDeleteFileTool, getListDirectoryTool, getInspectTool } from './tools/filesystem.tools';
 import { getRunCommandTool, getRunTestTool, getDockerExecTool, getDockerListTool } from './tools/terminal.tools';
 import { getGlobTool, getGrepTool, getFindSymbolTool, getSearchCodeTool } from './tools/search.tools';
 import { getGitStatusTool, getGitDiffTool, getGitLogTool } from './tools/git.tools';
-import { getTodoWriteTool, getAskUserTool } from './tools/agent.tools';
+import { getTodoWriteTool, getAskUserTool, getContextManageTool, getFinishTaskTool } from './tools/agent.tools';
 import { getSshRunTool } from './tools/ssh.tools';
 import { AuthModule } from '../auth/auth.module';
 import { ApiKeysModule } from '../keys/api-keys.module';
 import { SshModule } from '../ssh/ssh.module';
 import { ConnectorRegistry } from '../ssh/connector.registry';
+import { SecretsModule } from '../secrets/secrets.module';
+import { SecretsService } from '../secrets/secrets.service';
+import { McpModule } from '../mcp/mcp.module';
+import { McpService } from '../mcp/mcp.service';
+import { getSecretManagerTool } from './tools/secret.tools';
 
 const toolRegistryProvider = {
   provide: ToolRegistry,
-  inject: [ConnectorRegistry],
-  useFactory: (connectors: ConnectorRegistry) => {
+  inject: [ConnectorRegistry, SecretsService],
+  useFactory: (connectors: ConnectorRegistry, secrets: SecretsService) => {
     const registry = new ToolRegistry();
     registry.register(getReadFileTool());
     registry.register(getWriteFileTool());
     registry.register(getEditFileTool());
+    registry.register(getLineEditTool());
     registry.register(getReplaceLinesTool());
     registry.register(getApplyPatchTool());
     registry.register(getDeleteFileTool());
     registry.register(getListDirectoryTool());
+    registry.register(getInspectTool());
     registry.register(getRunCommandTool(connectors));
     registry.register(getRunTestTool());
     registry.register(getDockerExecTool());
@@ -57,7 +64,10 @@ const toolRegistryProvider = {
     registry.register(getGitLogTool());
     registry.register(getTodoWriteTool());
     registry.register(getAskUserTool());
+    registry.register(getContextManageTool());
+    registry.register(getFinishTaskTool());
     registry.register(getSshRunTool(connectors));
+    registry.register(getSecretManagerTool(secrets));
     return registry;
   },
 };
@@ -74,6 +84,8 @@ const eventEmitterProvider = {
     AuthModule,
     ApiKeysModule,
     SshModule,
+    SecretsModule,
+    McpModule,
     TypeOrmModule.forFeature([
       AgentSession,
       AgentRun,

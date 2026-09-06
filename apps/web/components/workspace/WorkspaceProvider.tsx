@@ -5,6 +5,10 @@ import { createContext, useCallback, useContext, useEffect, useReducer, type Rea
 type BottomPanelState = 'hidden' | 'collapsed' | 'expanded' | 'pinned';
 type ActivityPanel = 'explorer' | 'agent' | 'terminal' | 'search' | 'scm' | 'settings' | 'ssh';
 
+/** How much of the power-user IDE to show. 'dev' = full workspace;
+ *  'simple' = ChatGPT-style chat that still has files/terminal one tap away. */
+export type UiMode = 'dev' | 'simple';
+
 interface WorkspaceState {
   activePanel: ActivityPanel;
   sidePanelOpen: boolean;
@@ -12,6 +16,7 @@ interface WorkspaceState {
   agentWidth: number;
   terminalHeight: number;
   bottomPanelState: BottomPanelState;
+  uiMode: UiMode;
 }
 
 type WorkspaceAction =
@@ -26,15 +31,27 @@ type WorkspaceAction =
   | { type: 'COLLAPSE_BOTTOM_PANEL' }
   | { type: 'PIN_BOTTOM_PANEL' }
   | { type: 'UNPIN_BOTTOM_PANEL' }
+  | { type: 'SET_UI_MODE'; mode: UiMode }
   | { type: 'LOAD_PERSISTED'; state: Partial<WorkspaceState> };
 
 const STORAGE_KEY = 'sm-workspace-ui-v2';
+/** Set by onboarding / settings — the provider uses it as the initial value. */
+const MODE_KEY = 'sm-ui-mode';
+
+function readStandaloneMode(): UiMode {
+  if (typeof window === 'undefined') return 'dev';
+  try {
+    const raw = localStorage.getItem(MODE_KEY);
+    if (raw === 'dev' || raw === 'simple') return raw;
+  } catch { /* ignore */ }
+  return 'dev';
+}
 
 function loadPersisted(): Partial<WorkspaceState> {
   if (typeof window === 'undefined') return {};
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return {};
+    if (!raw) return { uiMode: readStandaloneMode() };
     const parsed = JSON.parse(raw);
     return {
       sidePanelOpen: parsed.sidePanelOpen,
@@ -43,9 +60,10 @@ function loadPersisted(): Partial<WorkspaceState> {
       terminalHeight: parsed.terminalHeight,
       bottomPanelState: parsed.bottomPanelState,
       activePanel: parsed.activePanel,
+      uiMode: parsed.uiMode === 'simple' ? 'simple' : parsed.uiMode === 'dev' ? 'dev' : readStandaloneMode(),
     };
   } catch {
-    return {};
+    return { uiMode: readStandaloneMode() };
   }
 }
 
@@ -59,6 +77,7 @@ function persistState(state: WorkspaceState) {
       terminalHeight: state.terminalHeight,
       bottomPanelState: state.bottomPanelState,
       activePanel: state.activePanel,
+      uiMode: state.uiMode,
     }));
   } catch { /* ignore */ }
 }
@@ -70,6 +89,7 @@ const initialState: WorkspaceState = {
   agentWidth: 400,
       terminalHeight: 280,
   bottomPanelState: 'pinned',
+  uiMode: 'dev',
 };
 
 function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
@@ -92,7 +112,25 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
       next = { ...state, explorerWidth: Math.max(180, Math.min(420, action.width)) };
       break;
     case 'SET_AGENT_WIDTH':
-      next = { ...state, agentWidth: Math.max(320, Math.min(640, action.width)) };
+      next = { ...state, agentWidth: Math.max(320, Math.min(820, action.width)) };
+      break;
+    case 'SET_UI_MODE':
+      // Simple mode keeps dev-only chrome collapsed; switching back restores it.
+      if (action.mode === 'simple') {
+        next = {
+          ...state,
+          uiMode: action.mode,
+          bottomPanelState: state.bottomPanelState === 'pinned'
+            ? 'collapsed'
+            : state.bottomPanelState,
+          sidePanelOpen: false,
+        };
+      } else {
+        next = { ...state, uiMode: action.mode };
+      }
+      try {
+        localStorage.setItem(MODE_KEY, action.mode);
+      } catch { /* ignore */ }
       break;
     case 'SET_TERMINAL_HEIGHT':
       next = { ...state, terminalHeight: Math.max(100, Math.min(500, action.height)) };
@@ -126,11 +164,14 @@ interface WorkspaceContextValue {
   state: WorkspaceState;
   dispatch: React.Dispatch<WorkspaceAction>;
   setActivePanel: (panel: ActivityPanel) => void;
+  setSidePanelOpen: (open: boolean) => void;
   toggleSidePanel: () => void;
   expandBottomPanel: () => void;
   collapseBottomPanel: () => void;
   pinBottomPanel: () => void;
   unpinBottomPanel: () => void;
+  setUiMode: (mode: UiMode) => void;
+  toggleUiMode: () => void;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
@@ -153,6 +194,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'TOGGLE_SIDE_PANEL' });
   }, []);
 
+  const setSidePanelOpen = useCallback((open: boolean) => {
+    dispatch({ type: 'SET_SIDE_PANEL_OPEN', open });
+  }, []);
+
   const expandBottomPanel = useCallback(() => {
     dispatch({ type: 'EXPAND_BOTTOM_PANEL' });
   }, []);
@@ -169,16 +214,27 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'UNPIN_BOTTOM_PANEL' });
   }, []);
 
+  const setUiMode = useCallback((mode: UiMode) => {
+    dispatch({ type: 'SET_UI_MODE', mode });
+  }, []);
+
+  const toggleUiMode = useCallback(() => {
+    dispatch({ type: 'SET_UI_MODE', mode: state.uiMode === 'dev' ? 'simple' : 'dev' });
+  }, [state.uiMode]);
+
   return (
     <WorkspaceContext.Provider value={{
       state,
       dispatch,
       setActivePanel,
+      setSidePanelOpen,
       toggleSidePanel,
       expandBottomPanel,
       collapseBottomPanel,
       pinBottomPanel,
       unpinBottomPanel,
+      setUiMode,
+      toggleUiMode,
     }}>
       {children}
     </WorkspaceContext.Provider>

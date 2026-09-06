@@ -3,6 +3,132 @@ import {
   ToolResult,
   ToolContext,
 } from './tool-registry';
+import {
+  SubContextManager,
+  renderContextPanel,
+  ALL_SUBCONTEXTS,
+  getSubContext,
+  MAX_ACTIVE_CONTEXTS,
+  MAX_ACTIVE_MCP,
+} from '../context/sub-context';
+
+/** Streams the live open/closed state to the UI after any context mutation. */
+export function emitContextState(manager: SubContextManager, toolContext: ToolContext): void {
+  if (!toolContext.eventEmitter) return;
+  const active = manager.activeIds.map((id) => {
+    const c = manager.resolve(id);
+    return { id, title: c?.title ?? id };
+  });
+  toolContext.eventEmitter.emitContextUpdated(
+    toolContext.sessionId,
+    toolContext.runId,
+    active,
+    manager.activeCount,
+    manager.maxActive,
+  );
+}
+
+export function getContextManageTool(): ToolDefinition {
+  return {
+    name: 'context_manage',
+    description:
+      'Open (activate) and close (deactivate) SUB-CONTEXTS of domain guidance ' +
+      'for the current work. Use it at SESSION START to pick the initial set ' +
+      `(min 0, max ${MAX_ACTIVE_CONTEXTS}) based on the user's request, and DURING the run to open ` +
+      'guidance a step needs or close guidance it no longer needs. ' +
+      'ACTIONS: "activate" (open a sub-context; give contextId) | ' +
+      '"deactivate" (close one, freeing its slot; give contextId) | ' +
+      '"list" (see the current ACTIVE/AVAILABLE panel without changing state). ' +
+      `MAX ${MAX_ACTIVE_CONTEXTS} sub-contexts active at once — to open a new one when full, ` +
+      'deactivate a no-longer-needed sub-context first (swap). ' +
+      `Available ids: ${ALL_SUBCONTEXTS.join(', ')}.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['activate', 'deactivate', 'list'],
+          description: 'What to do: open a sub-context, close one, or list state.',
+        },
+        contextId: {
+          type: 'string',
+          description: `The sub-context id (e.g. "backend_scale"). Required for activate/deactivate.`,
+        },
+      },
+      required: ['action'],
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
+    execute: async (
+      input: Record<string, unknown>,
+      context: ToolContext
+    ): Promise<ToolResult> => {
+      const manager = context.contextManager;
+      if (!manager) {
+        return {
+          content: [{ type: 'text', text: 'Error: no context manager is available in this run.' }],
+          isError: true,
+        };
+      }
+
+      const action = String(input.action || '');
+      const contextId = String(input.contextId || '').trim();
+
+      if (action === 'list') {
+        emitContextState(manager, context);
+        return {
+          content: [{
+            type: 'text',
+            text: `Current sub-context state:\n\n${renderContextPanel(manager)}\n\nTip: activate a sub-context or MCP server (mcp_<name>) the current step needs, deactivate it when done.`,
+          }],
+        };
+      }
+
+      if (action !== 'activate' && action !== 'deactivate') {
+        return {
+          content: [{ type: 'text', text: 'Error: action must be "activate", "deactivate", or "list".' }],
+          isError: true,
+        };
+      }
+
+      if (!contextId) {
+        const allIds = [...ALL_SUBCONTEXTS, ...manager.registeredMcpIds].join(', ');
+        return {
+          content: [{ type: 'text', text: `Error: contextId is required for ${action}. Available ids: ${allIds}.` }],
+          isError: true,
+        };
+      }
+
+      const result =
+        action === 'activate'
+          ? manager.activate(contextId)
+          : manager.deactivate(contextId);
+
+      // Stream state to the UI whether or not the mutation succeeded, so the
+      // panel always reflects reality after the agent reaches for a context.
+      emitContextState(manager, context);
+
+      if (!result.ok) {
+        return {
+          content: [{ type: 'text', text: `Error: ${result.error}\n\nCurrent state:\n${renderContextPanel(manager)}` }],
+          isError: true,
+        };
+      }
+
+      const verb = action === 'activate' ? 'ACTIVATED (loaded into context)' : 'DEACTIVATED (removed from context)';
+      return {
+        content: [{
+          type: 'text',
+          text:
+            `Sub-context ${verb}: ${contextId}.\nActive [${manager.activeCount}/${manager.maxActive}]: ${manager.activeIds.join(', ') || '(none)'}.\n\n` +
+            `Updated sub-context panel:\n${renderContextPanel(manager)}`,
+        }],
+      };
+    },
+  };
+}
 
 export function getTodoWriteTool(): ToolDefinition {
   return {
@@ -104,6 +230,44 @@ export function getTodoWriteTool(): ToolDefinition {
           type: 'text',
           text: `Updated todo list: ${counts('pending')} pending, ${counts('in_progress')} in progress, ${counts('completed')} completed.\n${formatted}`,
         }],
+      };
+    },
+  };
+}
+
+export function getFinishTaskTool(): ToolDefinition {
+  return {
+    name: 'finish_task',
+    description:
+      'Explicitly signal that the run is COMPLETE and stop the agent loop. ' +
+      'Call this ONCE when the user\'s task is genuinely done — after your final ' +
+      'verification passed and there is no further work to do. Include a concise ' +
+      '`summary` of what was accomplished. This is the authoritative, structural ' +
+      'way to end the run; do not repeat the same final answer in plain text and ' +
+      'do not emit more tool calls after calling this. For general chat (no task), ' +
+      'just reply in text — do not call this tool.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        summary: {
+          type: 'string',
+          description: 'A short summary of what was completed (shown to the user).',
+        },
+      },
+      required: ['summary'],
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+    },
+    execute: async (input: Record<string, unknown>): Promise<ToolResult> => {
+      const summary = String(input.summary || '').trim();
+      return {
+        content: [{
+          type: 'text',
+          text: `[TASK COMPLETE] The run will now finalize.${summary ? `\nSummary: ${summary}` : ''}`,
+        }],
+        summary: summary || 'Task marked complete',
       };
     },
   };

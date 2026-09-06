@@ -269,9 +269,12 @@ export class AgentGateway implements OnGatewayInit, OnGatewayConnection, OnGatew
 
     const eventTypes = [
       'text.delta',
+      'text.thought',
+      'context.updated',
       'text.end',
       'tool.started',
       'tool.output',
+      'tool.progress',
       'tool.completed',
       'tool.failed',
       'permission.required',

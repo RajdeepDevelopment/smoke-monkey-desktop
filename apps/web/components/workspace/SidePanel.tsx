@@ -8,9 +8,16 @@ interface SidePanelProps {
   children: ReactNode;
   width?: number;
   onWidthChange?: (width: number) => void;
+  /** When true the panel slides in/out (pushing content) instead of mounting/unmounting. */
+  pushAnimation?: boolean;
 }
 
-export const SidePanel = memo(function SidePanel({ children, width: controlledWidth, onWidthChange }: SidePanelProps) {
+export const SidePanel = memo(function SidePanel({
+  children,
+  width: controlledWidth,
+  onWidthChange,
+  pushAnimation = false,
+}: SidePanelProps) {
   const { state, dispatch } = useWorkspace();
   const panelRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -56,27 +63,34 @@ export const SidePanel = memo(function SidePanel({ children, width: controlledWi
     }
   }, [isDragging, handleMouseMove, handleMouseUp]);
 
-  if (!state.sidePanelOpen) return null;
+  const isOpen = state.sidePanelOpen;
+  if (!isOpen && !pushAnimation) return null;
 
   return (
     <>
       <div
         ref={panelRef}
-        className="shrink-0 flex flex-col glass-panel overflow-hidden"
-        style={{ width }}
+        className={cn(
+          'shrink-0 flex flex-col glass-panel overflow-hidden',
+          isOpen && 'glass-border',
+          pushAnimation && 'transition-[width] ease-out border-0',
+        )}
+        style={{ width: isOpen ? width : 0, transitionDuration: pushAnimation ? '200ms' : undefined }}
       >
         {children}
       </div>
       {/* Resize handle */}
-      <div
-        onMouseDown={handleMouseDown}
-        className={cn(
-          'w-1 shrink-0 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors relative z-10',
-          isDragging && 'bg-primary/40',
-        )}
-      >
-        <div className="absolute inset-y-0 left-0 right-0 -mx-1" />
-      </div>
+      {isOpen && (
+        <div
+          onMouseDown={handleMouseDown}
+          className={cn(
+            'w-1 shrink-0 cursor-col-resize hover:bg-primary/30 active:bg-primary/50 transition-colors relative z-10',
+            isDragging && 'bg-primary/40',
+          )}
+        >
+          <div className="absolute inset-y-0 left-0 right-0 -mx-1" />
+        </div>
+      )}
     </>
   );
 });

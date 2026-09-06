@@ -143,7 +143,15 @@ function ConversationList({
   );
 }
 
-export function ChatPanel({ initialConversationId }: { initialConversationId?: string }) {
+export function ChatPanel({
+  initialConversationId,
+  initialProvider,
+  initialModel,
+}: {
+  initialConversationId?: string;
+  initialProvider?: string;
+  initialModel?: string;
+}) {
   const { user, loading: authLoading, logout } = useAuth();
   const toast = useToast();
   const router = useRouter();
@@ -228,8 +236,16 @@ export function ChatPanel({ initialConversationId }: { initialConversationId?: s
           res.providers.find((p) => p.id === 'nvidia') ??
           res.providers.find((p) => p.id === res.defaultProvider) ??
           res.providers[0];
-        setProvider(preferred?.id ?? 'ollama');
-        setModel(preferred?.models[0] ?? '');
+        // A provider/model may be pinned via ?provider=&model= (e.g. selecting
+        // an OmniRoute model from the /models page). Prefer it over the
+        // default so the requested model is selected on load.
+        const requestedProvider = res.providers.find((p) => p.id === initialProvider);
+        setProvider(requestedProvider ? initialProvider! : (preferred?.id ?? 'ollama'));
+        setModel(
+          initialProvider && initialModel
+            ? initialModel
+            : (requestedProvider?.models[0] ?? preferred?.models[0] ?? ''),
+        );
       })
       .catch(() => setProviders([]));
     api

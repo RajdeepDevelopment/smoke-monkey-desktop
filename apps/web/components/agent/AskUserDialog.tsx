@@ -35,7 +35,12 @@ interface AskUserDialogProps {
 export function AskUserDialog({ open, question, options, multiple, onResolve, onDismiss }: AskUserDialogProps) {
   const [selected, setSelected] = useState<string[]>([]);
   const [custom, setCustom] = useState('');
-  const [customMode, setCustomMode] = useState(() => options.length === 0);
+  // Track whether the USER explicitly chose the custom-instruction view.
+  // The fallback (options.length === 0) is derived live so a dialog that
+  // mounts before options arrive (options=[]) does NOT get stuck in custom
+  // mode — once real options stream in, the cards render automatically.
+  const [userCustom, setUserCustom] = useState(false);
+  const customMode = userCustom || options.length === 0;
 
   const choice = useMemo(() => {
     if (customMode) return custom.trim();
@@ -51,7 +56,7 @@ export function AskUserDialog({ open, question, options, multiple, onResolve, on
   const canSubmit = choice.length > 0;
 
   const toggle = (label: string) => {
-    if (customMode) setCustomMode(false);
+    if (customMode) setUserCustom(false);
     setSelected((prev) =>
       multiple
         ? prev.includes(label) ? prev.filter((l) => l !== label) : [...prev, label]
@@ -141,7 +146,7 @@ export function AskUserDialog({ open, question, options, multiple, onResolve, on
               })}
 
               <button
-                onClick={() => setCustomMode(true)}
+                onClick={() => setUserCustom(true)}
                 className="flex w-full items-center gap-2.5 rounded-xl border border-dashed border-border/70 px-3.5 py-2.5 text-left transition-all duration-150 hover:border-primary/50 hover:bg-surface-800/40"
               >
                 <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] border border-border bg-surface-900 text-ink-muted">
@@ -158,7 +163,7 @@ export function AskUserDialog({ open, question, options, multiple, onResolve, on
                 <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted/70">Custom instruction</span>
                 {options.length > 0 && (
                   <button
-                    onClick={() => { setCustomMode(false); setCustom(''); }}
+                    onClick={() => { setUserCustom(false); setCustom(''); }}
                     className="text-[11px] text-ink-muted hover:text-foreground transition-colors"
                   >
                     Back to options

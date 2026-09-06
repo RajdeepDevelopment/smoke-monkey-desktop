@@ -173,6 +173,7 @@ function resolveArtifactDir(toolName: string): string {
       return ARTIFACT_DIRS.testResults;
     case 'edit_file':
     case 'apply_patch':
+    case 'line_edit':
       return ARTIFACT_DIRS.patches;
     default:
       return ARTIFACT_DIRS.artifacts;

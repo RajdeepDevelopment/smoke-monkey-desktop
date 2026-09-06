@@ -123,6 +123,14 @@ export const ideApi = {
       body: JSON.stringify({ path }),
     }),
 
+  /** Open the file with the OS-default application (PDF → Preview/browser,
+   *  PPT → PowerPoint, XLSX → Excel/Numbers, etc.). */
+  openFile: (path: string) =>
+    request<{ status: string }>('/api/agent/fs/open', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    }),
+
   // ── Git ─────────────────────────────────────────────────────────────────
   gitStatus: async (root: string) =>
     normalizeGitStatus(await request<unknown>(`/api/agent/git/status?path=${encodeURIComponent(root)}`)),

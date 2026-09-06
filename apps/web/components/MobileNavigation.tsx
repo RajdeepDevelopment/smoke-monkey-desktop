@@ -6,7 +6,8 @@ import { usePathname, useRouter } from 'next/navigation';
 import {
   BookOpen,
   Cpu,
-  Home,
+  Plug,
+  Code2,
   LogOut,
   MessageSquare,
   MoreHorizontal,
@@ -82,8 +83,8 @@ function NavRow({ href, icon, label, active, onNavigate, chevron }: RowProps) {
 }
 
 const PRIMARY_SECTIONS = [
-  { href: '/', label: 'Dashboard', icon: <Home className="h-[18px] w-[18px]" /> },
-  { href: '/chat', label: 'Chat', icon: <MessageSquare className="h-[18px] w-[18px]" /> },
+  { href: '/', label: 'Agent', icon: <Code2 className="h-[18px] w-[18px]" /> },
+  { href: '/mcp', label: 'MCP', icon: <Plug className="h-[18px] w-[18px]" /> },
   { href: '/documents', label: 'Knowledge Base', icon: <BookOpen className="h-[18px] w-[18px]" /> },
 ];
 
@@ -329,9 +330,9 @@ export function MobileBottomNav() {
   const [moreOpen, setMoreOpen] = useState(false);
 
   const items = [
-    { href: '/', label: 'Home', icon: <Home className="h-5 w-5" /> },
-    { href: '/chat', label: 'Chat', icon: <MessageSquare className="h-5 w-5" /> },
+    { href: '/', label: 'Agent', icon: <Code2 className="h-5 w-5" /> },
     { href: '/documents', label: 'Knowledge', icon: <BookOpen className="h-5 w-5" /> },
+    { href: '/mcp', label: 'MCP', icon: <Plug className="h-5 w-5" /> },
   ];
 
   return (

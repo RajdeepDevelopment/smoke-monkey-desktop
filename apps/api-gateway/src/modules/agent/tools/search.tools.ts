@@ -608,6 +608,41 @@ export function getSearchCodeTool(): ToolDefinition {
         return { content: [{ type: 'text', text: 'Error: query is required.' }], isError: true };
       }
 
+      // WorkspaceIndex fast-path: a plain identifier (no regex) is really a
+      // symbol lookup. When the SQLite index has data, resolve definitions +
+      // references instantly instead of a linear grep scan — this is what makes
+      // the pre-built index actually get used during work loops.
+      if (context.workspaceIndex && /^[A-Za-z_][A-Za-z0-9_]*$/.test(query)) {
+        try {
+          const index = context.workspaceIndex;
+          const stats = index.stats();
+          if (stats.files > 0) {
+            const defs = index.findSymbol(query);
+            const refs = index.findReferences(query);
+            if (defs.length > 0 || refs.length > 0) {
+              const parts: string[] = [];
+              if (defs.length > 0) {
+                parts.push('DEFINITIONS:');
+                for (const r of defs.slice(0, limit)) {
+                  parts.push(`  ${r.kind} ${query} — ${r.file}:${r.line}${r.endLine && r.endLine !== r.line ? `-${r.endLine}` : ''}`);
+                }
+              }
+              if (refs.length > 0) {
+                parts.push('REFERENCES:');
+                for (const r of refs.slice(0, limit)) {
+                  parts.push(`  ${r.kind} — ${r.file}:${r.line}`);
+                }
+              }
+              return {
+                content: [{ type: 'text', text: `[workspace-index] Found for "${query}":\n\n${parts.join('\n')}` }],
+              };
+            }
+          }
+        } catch {
+          // Fall through to grep-based content search.
+        }
+      }
+
       try {
         const stdout = await contentSearch(context.workspaceDir, query, searchPath, {
           include,

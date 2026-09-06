@@ -28,8 +28,24 @@ export class AgentEventEmitter {
     this.emitRun(sessionId, runId, 'text.delta', { messageId, delta });
   }
 
-  emitTextEnd(sessionId: string, runId: string, messageId: string, content: string, toolCalls?: unknown[]): void {
-    this.emitRun(sessionId, runId, 'text.end', { messageId, content, toolCalls });
+  /**
+   * Streams the model's internal reasoning/thinking ("Thought phase") as it
+   * arrives, so the UI can render a live foldable section while the model is
+   * still deliberating. Mirrors text.delta but carries reasoning content.
+   */
+  emitTextThought(sessionId: string, runId: string, messageId: string, delta: string): void {
+    this.emitRun(sessionId, runId, 'text.thought', { messageId, delta });
+  }
+
+  emitTextEnd(
+    sessionId: string,
+    runId: string,
+    messageId: string,
+    content: string,
+    toolCalls?: unknown[],
+    reasoning?: string | null,
+  ): void {
+    this.emitRun(sessionId, runId, 'text.end', { messageId, content, toolCalls, reasoning });
   }
 
   emitToolStarted(sessionId: string, runId: string, toolCallId: string, toolName: string, args: unknown): void {
@@ -38,6 +54,19 @@ export class AgentEventEmitter {
 
   emitToolOutput(sessionId: string, runId: string, toolCallId: string, output: string): void {
     this.emitRun(sessionId, runId, 'tool.output', { toolCallId, output });
+  }
+
+  /**
+   * Streams live execution detail for a long-running tool (e.g. write_file
+   * writing content chunk-by-chunk, apply_patch applying hunks file-by-file)
+   * so the UI can show real progress + a streaming preview while the tool is
+   * still running — not just a spinner that stays silent until completion.
+   *
+   * @param progress - Flat payload (toolName, path, percent, bytes, lines,
+   *                   preview, …). The `toolCallId` is merged in automatically.
+   */
+  emitToolProgress(sessionId: string, runId: string, toolCallId: string, progress: Record<string, unknown>): void {
+    this.emitRun(sessionId, runId, 'tool.progress', { toolCallId, ...progress });
   }
 
   emitToolCompleted(sessionId: string, runId: string, toolCallId: string, result: unknown): void {
@@ -91,8 +120,8 @@ export class AgentEventEmitter {
   emitCompactionCompleted(
     sessionId: string,
     runId: string,
-    metrics: { tokensBefore: number; tokensAfter: number; tokensSaved: number; messagesCompacted: number },
-  ): void {
+    metrics: { tokensBefore: number; tokensAfter: number; tokensSaved: number; messagesCompacted: number; summary?: string },
+  ) {
     this.emitRun(sessionId, runId, 'compaction.completed', metrics);
   }
 
@@ -106,6 +135,25 @@ export class AgentEventEmitter {
 
   emitTodoUpdated(sessionId: string, runId: string, todos: unknown[]): void {
     this.emitRun(sessionId, runId, 'todo.updated', { todos });
+  }
+
+  /**
+   * Emits the run's live sub-context state every time the agent opens/closes
+   * a context, so the UI streams "frontend_ui opened · backend_scale closed"
+   * in real time (same channel as todo.updated).
+   */
+  emitContextUpdated(
+    sessionId: string,
+    runId: string,
+    active: Array<{ id: string; title: string }>,
+    count: number,
+    maxActive: number,
+  ): void {
+    // TEMP DEBUG: verify sub-context switching is emitted (remove after triage).
+    this.logger.log(
+      `[context.updated] run=${runId} active=[${active.map((a) => a.id).join(', ')}] count=${count}/${maxActive}`,
+    );
+    this.emitRun(sessionId, runId, 'context.updated', { active, count, maxActive });
   }
 
   /**

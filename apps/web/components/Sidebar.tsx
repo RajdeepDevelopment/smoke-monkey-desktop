@@ -19,6 +19,7 @@ import {
   LogOut,
   Globe,
   Code2,
+  Plug,
   type LucideIcon,
 } from 'lucide-react';
 import { BrandIcon } from './BrandIcon';
@@ -39,9 +40,9 @@ export interface NavItem {
 }
 
 export const NAV: NavItem[] = [
-  { href: '/', label: 'Dashboard', icon: LayoutDashboard },
-  { href: '/chat', label: 'Chat', icon: MessageSquare },
+  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/agent', label: 'Agent', icon: Code2 },
+  { href: '/mcp', label: 'MCP', icon: Plug },
   { href: '/documents', label: 'Knowledge Base', icon: BookOpen },
   { href: '/models', label: 'Models', icon: Cpu },
   { href: '/playground', label: 'Playground', icon: Zap },
@@ -73,14 +74,16 @@ export function Sidebar() {
   return (
     <TooltipProvider delayDuration={200}>
       <motion.aside
-        animate={{ width: collapsed ? 76 : 264 }}
+        animate={{ width: collapsed ? 80 : 288 }}
         transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
         className="relative z-20 hidden shrink-0 flex-col border-r border-surface-800/80 bg-bg-elevated/90 backdrop-blur lg:flex"
       >
         {/* Brand */}
-        <div className={cn('flex h-16 shrink-0 items-center gap-2.5 border-b border-surface-800/60 px-4', collapsed && 'justify-center px-0')}>
-          <Link href="/" className="flex min-w-0 items-center gap-2.5" aria-label="Smoke Monkey home">
-            <BrandIcon size={36} className="rounded-lg" />
+        <div className={cn('flex h-14 shrink-0 items-center gap-3 border-b border-surface-800/60 px-4', collapsed && 'justify-center px-0')}>
+          <Link href="/" className="flex min-w-0 items-center gap-3" aria-label="Smoke Monkey home">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-[11px] bg-gradient-to-br from-white/15 via-white/5 to-transparent p-[3px] ring-1 ring-inset ring-white/15 shadow-[0_2px_10px_rgba(0,0,0,0.35)]">
+              <BrandIcon size={34} />
+            </span>
             <AnimatePresence initial={false}>
               {!collapsed && (
                 <motion.span
@@ -97,31 +100,7 @@ export function Sidebar() {
           </Link>
         </div>
 
-        {/* New chat */}
-        <div className="px-3 pt-3">
-          <Link
-            href="/chat"
-            className={cn(
-              'flex items-center gap-2.5 rounded-lg bg-primary py-2 text-sm font-medium text-primary-foreground shadow-sm shadow-primary/20 transition-all hover:bg-primary-hover',
-              collapsed ? 'justify-center px-0 py-2.5' : 'px-3',
-            )}
-            title={collapsed ? 'New chat' : undefined}
-          >
-            <Plus className="h-4 w-4 shrink-0" />
-            <AnimatePresence initial={false}>
-              {!collapsed && (
-                <motion.span
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.12 }}
-                >
-                  New chat
-                </motion.span>
-              )}
-            </AnimatePresence>
-          </Link>
-        </div>
+        {/* Nav */}
 
         {/* Nav */}
         <nav className="flex-1 overflow-y-auto px-3 py-3">
@@ -140,14 +119,21 @@ export function Sidebar() {
                     'group relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors',
                     collapsed && 'justify-center px-0',
                     active
-                      ? 'bg-primary-subtle text-white'
+                      ? 'text-white'
                       : 'text-ink-secondary hover:bg-surface-800/70 hover:text-white',
                   )}
                 >
                   {active && (
                     <motion.span
                       layoutId="nav-active-pill"
-                      className="absolute inset-0 rounded-lg bg-primary-subtle"
+                      className="absolute inset-0 rounded-lg border border-primary/10 bg-gradient-to-r from-primary/20 via-primary/10 to-transparent"
+                      transition={{ type: 'spring', stiffness: 500, damping: 40 }}
+                    />
+                  )}
+                  {active && !collapsed && (
+                    <motion.span
+                      layoutId="nav-active-bar"
+                      className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-gradient-to-b from-violet-400 to-indigo-500"
                       transition={{ type: 'spring', stiffness: 500, damping: 40 }}
                     />
                   )}
@@ -183,45 +169,45 @@ export function Sidebar() {
         </nav>
 
         {/* Footer: retrieval mode + user + collapse */}
-        <div className="shrink-0 border-t border-surface-800/60 p-3">
+        <div className="shrink-0 border-t border-surface-800/60 px-2.5 pb-3 pt-3">
           {!collapsed && (
-            <div className="mb-3 flex items-center gap-2 rounded-lg border border-surface-800 bg-surface-900/60 px-3 py-2.5">
+            <div className="mb-2 flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 backdrop-blur-md">
               <span className="relative flex h-2 w-2 shrink-0">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-60" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
               </span>
               <div className="min-w-0 flex-1">
                 <p className="text-xs font-medium text-ink-primary">Retrieval: Hybrid</p>
-                <p className="text-[11px] text-ink-muted">Semantic + keyword</p>
+                <p className="text-[11px] text-slate-400">Semantic + keyword</p>
               </div>
-              <Globe className="h-3.5 w-3.5 text-ink-muted" />
+              <Globe className="h-3.5 w-3.5 text-slate-400" />
             </div>
           )}
 
-          <div className={cn('flex items-center gap-2', collapsed && 'flex-col gap-2')}>
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 backdrop-blur-md">
             <div
               className={cn(
-                'flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/15 text-xs font-semibold text-primary',
-                collapsed && 'h-9 w-9',
+                'flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/15 text-xs font-semibold text-primary ring-1 ring-inset ring-primary/20',
+                collapsed && 'h-8 w-8',
               )}
             >
               {initial}
             </div>
             {!collapsed && (
               <div className="min-w-0 flex-1">
-                <p className="truncate text-[13px] font-medium text-ink-primary">{userName}</p>
-                <p className="truncate text-[11px] text-ink-muted">Pro workspace</p>
+                <p className="truncate text-[12px] font-medium text-slate-100">{userName}</p>
+                <p className="truncate text-[11px] text-slate-400">Pro workspace</p>
               </div>
             )}
             {!collapsed && (
               <button
                 type="button"
                 onClick={handleLogout}
-                className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-muted transition-colors hover:bg-surface-800 hover:text-red-300"
+                className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-white/10 hover:text-red-300"
                 aria-label="Sign out"
                 title="Sign out"
               >
-                <LogOut className="h-4 w-4" />
+                <LogOut className="h-3.5 w-3.5" />
               </button>
             )}
           </div>
@@ -230,8 +216,8 @@ export function Sidebar() {
             type="button"
             onClick={toggle}
             className={cn(
-              'mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-surface-800 py-1.5 text-[11px] font-medium text-ink-muted transition-colors hover:bg-surface-800/70 hover:text-ink-primary',
-              collapsed && 'mt-2 border-0 py-1',
+              'flex w-full items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/5 py-1.5 text-[11px] font-medium text-slate-300 transition-colors hover:bg-white/10 hover:text-white',
+              collapsed && 'border-0 bg-transparent py-1 text-slate-400',
             )}
           >
             {collapsed ? (

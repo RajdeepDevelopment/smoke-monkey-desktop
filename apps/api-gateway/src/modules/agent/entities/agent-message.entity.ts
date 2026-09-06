@@ -23,6 +23,11 @@ export class AgentMessage {
   @Column({ type: 'text' })
   content: string;
 
+  /** Model reasoning/thinking stream ("Thought phase"), persisted so the
+   *  session chat can replay it. Never re-sent to the model on later turns. */
+  @Column({ type: 'text', nullable: true })
+  reasoning: string | null;
+
   @Column({ type: 'simple-json', nullable: true })
   toolCalls: ToolCallJson[] | null;
 

@@ -1,5 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { RedisService } from '../../common/services/redis.service';
+import { User } from '../users/user.entity';
 
 export interface WebSearchSettings {
   serverEnabled: boolean;
@@ -23,7 +26,14 @@ export class SettingsService {
   private readonly webSearchTtl = 60 * 60 * 24 * 30; // 30 days
   private readonly omnirouteTtl = 60 * 60 * 24 * 30; // 30 days
 
-  constructor(private readonly redis: RedisService) {}
+  constructor(
+    private readonly redis: RedisService,
+    @InjectRepository(User) private readonly users: Repository<User>,
+  ) {}
+
+  private get useSqliteFlags(): boolean {
+    return !this.redis.isAvailable();
+  }
 
   webSearchKey(userId: string): string {
     return `rag:user_setting:${userId}:web_search`;
@@ -45,10 +55,15 @@ export class SettingsService {
     const serverEnabled = this.serverWebSearchEnabled();
     let enabled = false;
     if (serverEnabled) {
-      try {
-        enabled = (await this.redis.get(this.webSearchKey(userId))) === '1';
-      } catch (err) {
-        this.logger.warn(`web search setting lookup failed: ${err}`);
+      if (this.useSqliteFlags) {
+        const u = await this.users.findOne({ where: { id: userId } });
+        enabled = u?.webSearchEnabled ?? true;
+      } else {
+        try {
+          enabled = (await this.redis.get(this.webSearchKey(userId))) === '1';
+        } catch (err) {
+          this.logger.warn(`web search setting lookup failed: ${err}`);
+        }
       }
     }
     return { serverEnabled, enabled };
@@ -58,6 +73,10 @@ export class SettingsService {
     const serverEnabled = this.serverWebSearchEnabled();
     if (!serverEnabled) {
       return { serverEnabled, enabled: false };
+    }
+    if (this.useSqliteFlags) {
+      await this.users.update(userId, { webSearchEnabled: enabled });
+      return { serverEnabled, enabled };
     }
     try {
       if (enabled) {
@@ -76,10 +95,15 @@ export class SettingsService {
     const serverEnabled = this.serverOmniRouteEnabled();
     let enabled = false;
     if (serverEnabled) {
-      try {
-        enabled = (await this.redis.get(this.omnirouteKey(userId))) === '1';
-      } catch (err) {
-        this.logger.warn(`omniroute setting lookup failed: ${err}`);
+      if (this.useSqliteFlags) {
+        const u = await this.users.findOne({ where: { id: userId } });
+        enabled = u?.omnirouteEnabled ?? true;
+      } else {
+        try {
+          enabled = (await this.redis.get(this.omnirouteKey(userId))) === '1';
+        } catch (err) {
+          this.logger.warn(`omniroute setting lookup failed: ${err}`);
+        }
       }
     }
     return { serverEnabled, enabled };
@@ -89,6 +113,10 @@ export class SettingsService {
     const serverEnabled = this.serverOmniRouteEnabled();
     if (!serverEnabled) {
       return { serverEnabled, enabled: false };
+    }
+    if (this.useSqliteFlags) {
+      await this.users.update(userId, { omnirouteEnabled: enabled });
+      return { serverEnabled, enabled };
     }
     try {
       if (enabled) {
@@ -101,5 +129,35 @@ export class SettingsService {
       throw err;
     }
     return { serverEnabled, enabled };
+  }
+
+private readonly onboardingKey = (userId: string): string =>
+    `rag:user_setting:${userId}:onboarding_completed`;
+
+async getOnboarding(userId: string): Promise<{ completed: boolean }> {
+    if (this.useSqliteFlags) {
+      const u = await this.users.findOne({ where: { id: userId } });
+      return { completed: u?.onboardingCompleted ?? false };
+    }
+    try {
+      return { completed: (await this.redis.get(this.onboardingKey(userId))) === '1' };
+    } catch (err) {
+      this.logger.warn(`onboarding setting lookup failed: ${err}`);
+      return { completed: false };
+    }
+  }
+
+  async setOnboarding(userId: string): Promise<{ completed: boolean }> {
+    if (this.useSqliteFlags) {
+      await this.users.update(userId, { onboardingCompleted: true });
+      return { completed: true };
+    }
+    try {
+      await this.redis.set(this.onboardingKey(userId), '1', 60 * 60 * 24 * 365);
+    } catch (err) {
+      this.logger.warn(`onboarding setting write failed: ${err}`);
+      throw err;
+    }
+    return { completed: true };
   }
 }

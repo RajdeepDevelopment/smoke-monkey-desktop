@@ -113,7 +113,7 @@ export const BottomPanel = memo(function BottomPanel({ children, header }: Botto
             {isPinned ? <PinOff className="h-3 w-3" /> : <Pin className="h-3 w-3" />}
           </button>
           <button
-            onClick={() => isExpanded ? collapseBottomPanel() : expandBottomPanel()}
+            onClick={() => (isExpanded ? collapseBottomPanel() : expandBottomPanel())}
             className="p-1 rounded text-ink-muted hover:text-foreground glass-hover transition-colors"
             title={isExpanded ? 'Collapse' : 'Expand'}
           >

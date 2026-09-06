@@ -5,24 +5,26 @@
 // ─────────────────────────────────────────────────────────────────────────
 
 // Surfaces — very dark neutral blue-gray, never pure black.
-$bg: hsl(216, 39%, 5%);            // #070B10 app background
-$bg-elevated: hsl(217, 36%, 6%);   // sidebar
-$surface-950: hsl(216, 39%, 5%);
-$surface-900: hsl(216, 35%, 8%);   // #0D131D primary surface
-$surface-850: hsl(218, 36%, 10%);
-$surface-800: hsl(221, 39%, 11%);  // #111827 elevated surface
-$surface-700: hsl(215, 28%, 17%);
-$surface-600: hsl(215, 25%, 27%);
+$bg: hsl(220, 38%, 5%);            // #080B12 app background
+$bg-elevated: hsl(219, 33%, 8%);   // #0D111A sidebar
+$surface-950: hsl(220, 38%, 5%);
+$surface-900: hsl(219, 33%, 8%);   // #0D111A primary surface
+$surface-850: hsl(222, 30%, 10%);
+$surface-800: hsl(221, 39%, 11%);  // #111827 secondary surface
+$surface-750: hsl(223, 30%, 13%);  // #192231 hover surface
+$surface-700: hsl(223, 28%, 12%);  // #151C28 elevated surface
+$surface-600: hsl(226, 22%, 20%);
 
 // Text
 $ink-primary: hsl(210, 40%, 98%);
 $ink-secondary: hsl(213, 27%, 65%);
 $ink-muted: hsl(215, 20%, 47%);
 
-// Brand
-$primary: hsl(262, 83%, 58%);
-$primary-hover: hsl(258, 90%, 66%);
-$primary-subtle: hsla(262, 83%, 58%, 0.15);
+// Brand (purple Smoke Monkey accent)
+$primary: hsl(258, 90%, 66%);       // #8B5CF6
+$primary-hover: hsl(260, 92%, 76%); // #A78BFA
+$primary-deep: hsl(263, 74%, 50%);  // #6D28D9
+$primary-subtle: hsla(258, 90%, 66%, 0.15);
 $accent: hsl(188, 94%, 43%);
 $accent-hover: hsl(189, 86%, 53%);
 
@@ -31,8 +33,11 @@ $success: hsl(142, 71%, 45%);
 $warning: hsl(38, 92%, 50%);
 $error: hsl(0, 84%, 60%);
 
-// Border
-$border: hsl(215, 25%, 18%);
+// Border — separation only, never bright
+$border: rgba(148, 163, 184, 0.14);
+$border-subtle: rgba(148, 163, 184, 0.10);
+$border-hover: rgba(139, 92, 246, 0.35);
+$border-active: rgba(139, 92, 246, 0.55);
 
 // Typography
 $font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, sans-serif;

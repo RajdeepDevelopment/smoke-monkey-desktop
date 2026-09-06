@@ -19,6 +19,7 @@ const config: Config = {
           DEFAULT: 'hsl(var(--primary))',
           foreground: 'hsl(var(--primary-foreground))',
           hover: 'hsl(var(--primary-hover))',
+          deep: 'hsl(var(--primary-deep))',
           subtle: 'hsl(var(--primary-subtle))',
         },
         secondary: {
@@ -51,6 +52,9 @@ const config: Config = {
           DEFAULT: 'hsl(var(--destructive))',
           subtle: 'hsl(var(--error-subtle))',
         },
+        info: {
+          DEFAULT: 'hsl(var(--info))',
+        },
         popover: {
           DEFAULT: 'hsl(var(--popover))',
           foreground: 'hsl(var(--popover-foreground))',
@@ -69,6 +73,7 @@ const config: Config = {
           900: 'hsl(var(--surface-900))',
           850: 'hsl(var(--surface-850))',
           800: 'hsl(var(--surface-800))',
+          750: 'hsl(var(--surface-750))',
           700: 'hsl(var(--surface-700))',
           600: 'hsl(var(--surface-600))',
         },
@@ -80,6 +85,7 @@ const config: Config = {
       },
       borderRadius: {
         card: 'var(--radius-card)',
+        compose: '16px',
         lg: 'var(--radius)',
         md: 'calc(var(--radius) - 2px)',
         sm: 'calc(var(--radius) - 4px)',
@@ -90,6 +96,10 @@ const config: Config = {
         'card-lift':
           '0 4px 12px -2px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.4)',
         'soft-panel': 'inset 0 1px 0 0 rgba(255, 255, 255, 0.03)',
+        subtle: '0 1px 2px rgba(0, 0, 0, 0.25)',
+        panel: '0 8px 24px rgba(0, 0, 0, 0.22)',
+        floating: '0 16px 48px rgba(0, 0, 0, 0.35)',
+        'focus-ring': '0 0 0 1px rgba(139,92,246,0.35), 0 8px 30px rgba(109,40,217,0.18)',
       },
       backgroundImage: {
         'primary-glow':

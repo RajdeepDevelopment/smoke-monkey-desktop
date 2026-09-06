@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 PARENT_QUERY = "SELECT id, content FROM chunks WHERE id = ANY($1::uuid[])"
 
-CLOUD_PROVIDERS = ("openrouter", "nvidia", "openai", "xai", "gemini", "opencode")
+CLOUD_PROVIDERS = ("openrouter", "nvidia", "openai", "xai", "gemini", "opencode", "huggingface")
 
 EMBED_CACHE_PREFIX = "rag:embed:v1"
 RETRIEVAL_CACHE_PREFIX = "rag:retr:v1"
@@ -135,6 +135,8 @@ def _server_default_key(provider: str) -> str:
         return settings.gemini_api_key
     if provider == "opencode":
         return settings.opencode_api_key
+    if provider == "huggingface":
+        return settings.huggingface_api_key
     return ""
 
 
@@ -387,6 +389,8 @@ class QueryPipeline:
                 omniroute_model=settings.omniroute_chat_model,
                 opencode_api_key=settings.opencode_api_key,
                 opencode_model=settings.opencode_chat_model,
+                huggingface_api_key=settings.huggingface_api_key,
+                huggingface_model=settings.huggingface_chat_model,
                 model=model,
                 api_key=api_key,
             )

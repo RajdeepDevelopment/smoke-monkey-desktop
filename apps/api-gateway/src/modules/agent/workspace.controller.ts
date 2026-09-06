@@ -63,6 +63,13 @@ export class WorkspaceController {
     return { status: 'ok' };
   }
 
+  @Post('fs/open')
+  async openWithDefaultApp(@Body() body: { path: string }) {
+    if (!body.path) throw new BadRequestException('path required');
+    await this.workspace.openWithDefaultApp(body.path);
+    return { status: 'ok' };
+  }
+
   // ── Git ──────────────────────────────────────────────────────────────────
 
   @Get('git/status')

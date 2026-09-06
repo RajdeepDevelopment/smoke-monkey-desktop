@@ -26,6 +26,10 @@ mkdir -p "$DEST/Contents/MacOS" "$DEST/Contents/Resources"
 cp "$BIN" "$DEST/Contents/MacOS/smoke-monkey-desktop"
 cp "$ICNS" "$DEST/Contents/Resources/icon.icns"
 
+# OmniRoute is NOT bundled — the gateway installs it at runtime (npm global,
+# pinned to omniroute@3.8.50) and shows an "Initializing OmniRoute…" loader
+# in the UI while it is being installed/started/synced.
+
 cat > "$DEST/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

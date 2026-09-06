@@ -235,6 +235,37 @@ export interface UserKeysResponseDto {
   keys: UserKeyDto[];
 }
 
+/** A named secret stored in the Secret Manager (never exposes the value). */
+export interface SecretSummaryDto {
+  name: string;
+  keyPrefix: string;
+  last4: string;
+  status: 'ok' | 'invalid';
+  /** Hugging Face token billing tier, detected from whoami at save time. */
+  billingTier?: 'free' | 'paid' | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ListSecretsResponseDto {
+  secrets: SecretSummaryDto[];
+}
+
+export interface SaveSecretResultDto extends SecretSummaryDto {
+  verified?: boolean;
+}
+
+/** Live status of the Hugging Face token (used by Settings + agent prompt). */
+export interface HuggingFaceStatusDto {
+  configured: boolean;
+  status: 'ok' | 'invalid';
+  envName: string;
+  /** Account billing tier detected from whoami: 'free' (Basic), 'paid' (Pro/credits). */
+  tier?: 'free' | 'paid' | null;
+  /** Detected account metadata: canPay, isPro, billingMode, periodEnd. */
+  billingMeta?: Record<string, unknown> | null;
+}
+
 /** Per-user feature settings (stored as Redis flags by the api-gateway). */
 export interface UserSettingsDto {
   webSearch: {
@@ -264,6 +295,61 @@ export interface OmniRouteModelDto {
 export interface OmniRouteModelsResponseDto {
   reachable: boolean;
   models: OmniRouteModelDto[];
+}
+
+/** Live OmniRoute provisioning lifecycle (drives the "Initializing…" UI). */
+export interface OmniRouteStatusDto {
+  /** Reactive lifecycle: unknown → idle/installing → starting → syncing → ready (| error). */
+  status: 'unknown' | 'idle' | 'installing' | 'starting' | 'syncing' | 'ready' | 'error';
+  /** Gateway is healthy right now. */
+  reachable: boolean;
+  installing: boolean;
+  starting: boolean;
+  syncing: boolean;
+  ready: boolean;
+  /** Human-readable failure detail when `status === 'error'`. */
+  error: string | null;
+  /** Server-level gate (OMNIROUTE_ENABLED env) — locked when false. */
+  serverEnabled: boolean;
+}
+
+/** First-run onboarding wizard state for the current user. */
+export interface OnboardingStateDto {
+  completed: boolean;
+}
+
+// ── MCP contracts ───────────────────────────────────────────────────────────
+
+export interface McpServerDto {
+  id: string;
+  name: string;
+  description: string;
+  transport: 'stdio' | 'http';
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  url: string | null;
+  oauthConnected?: boolean;
+  oauthExpiresAt?: number | null;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface McpOAuthStartResultDto {
+  authUrl: string;
+  state: string;
+}
+
+export interface McpServersResponseDto {
+  servers: McpServerDto[];
+}
+
+export interface McpTestResultDto {
+  ok: boolean;
+  tools?: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
+  error?: string;
+  needsOAuth?: boolean;
 }
 
 // ── Agent contracts ──────────────────────────────────────────────────────────
@@ -336,7 +422,8 @@ export type AgentEventType =
   | 'permission.required'
   | 'run.started' | 'run.completed' | 'run.interrupted' | 'run.failed'
   | 'step.started' | 'step.ended'
-  | 'todo.updated';
+  | 'todo.updated'
+  | 'context.updated';
 
 export interface AgentEventDto {
   type: AgentEventType;

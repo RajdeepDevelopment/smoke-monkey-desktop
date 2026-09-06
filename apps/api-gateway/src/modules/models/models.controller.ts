@@ -67,6 +67,23 @@ const FALLBACK_MODELS_RESPONSE = {
       models: OPENCODE_ZEN_MODEL_IDS,
     },
     {
+      id: 'huggingface',
+      label: 'Hugging Face',
+      models: [
+        'Qwen/Qwen2.5-72B-Instruct',
+        'Qwen/Qwen3-30B-A3B-Instruct-2507',
+        'Qwen/Qwen3-4B',
+        'Qwen/Qwen2.5-Coder-32B-Instruct',
+        'meta-llama/Llama-3.3-70B-Instruct',
+        'meta-llama/Llama-3.1-8B-Instruct',
+        'mistralai/Mistral-Small-3.2-24B-Instruct-2509',
+        'deepseek-ai/DeepSeek-R1-Distill-Qwen-32B',
+        'deepseek-ai/DeepSeek-V3',
+        'HuggingFaceTB/SmolLM2-1.7B-Instruct',
+        'google/gemma-3-27b-it',
+      ],
+    },
+    {
       id: 'omniroute',
       label: 'OmniRoute (free, keyless)',
       models: ['kimi-k2', 'claude-haiku-4', 'gpt-4o-mini-free', 'gemini-flash-free', 'deepseek-chat-free'],
@@ -95,6 +112,13 @@ const FALLBACK_MODELS_RESPONSE = {
       { name: 'Llama 4 Maverick', id: 'meta-llama/llama-4-maverick', provider: 'openrouter', notes: 'Meta open model' },
       { name: 'Qwen3 Coder', id: 'qwen/qwen3-coder', provider: 'openrouter', notes: 'Coding specialist' },
       { name: 'Mistral Large', id: 'mistralai/mistral-large-2501', provider: 'openrouter', notes: 'Mistral flagship' },
+      { name: 'Qwen 2.5 72B Instruct', id: 'Qwen/Qwen2.5-72B-Instruct', provider: 'huggingface', isFree: true, notes: 'HF — verified FREE on a Basic token; best all-round HF chat model' },
+      { name: 'Llama 3.1 8B Instruct', id: 'meta-llama/Llama-3.1-8B-Instruct', provider: 'huggingface', isFree: true, notes: 'HF — verified FREE on a Basic token; fast chat model' },
+      { name: 'Qwen3 30B Instruct', id: 'Qwen/Qwen3-30B-A3B-Instruct-2507', provider: 'huggingface', isFree: false, notes: 'HF — needs credits/PRO; 400 model_not_supported on Basic tokens' },
+      { name: 'Llama 3.3 70B Instruct', id: 'meta-llama/Llama-3.3-70B-Instruct', provider: 'huggingface', isFree: false, notes: 'HF — Meta\'s strong open instruct model (likely needs credits/PRO)' },
+      { name: 'Mistral Small 3.2', id: 'mistralai/Mistral-Small-3.2-24B-Instruct-2509', provider: 'huggingface', isFree: false, notes: 'HF — fast, efficient Mistral model' },
+      { name: 'DeepSeek R1 Distill 32B', id: 'deepseek-ai/DeepSeek-R1-Distill-Qwen-32B', provider: 'huggingface', isFree: false, notes: 'HF — reasoning model' },
+      { name: 'SmolLM2 1.7B', id: 'HuggingFaceTB/SmolLM2-1.7B-Instruct', provider: 'huggingface', isFree: false, notes: 'HF — 400 model_not_supported on Basic tokens; needs credits/PRO' },
       { name: 'GPT-5.6 Luna', id: 'gpt-5.6-luna', provider: 'openai', notes: 'OpenAI flagship' },
       { name: 'GPT-4o', id: 'gpt-4o', provider: 'openai', notes: 'Multimodal GPT' },
       { name: 'GPT-4o Mini', id: 'gpt-4o-mini', provider: 'openai', notes: 'Fast lightweight GPT' },
@@ -142,6 +166,8 @@ const FALLBACK_MODELS_RESPONSE = {
     { role: 'ocr', label: 'Document OCR', provider: 'nvidia', model: 'nvidia/nemotron-ocr-v2', rating: 4, isFree: false, notes: 'Multilingual OCR for PDF/document ingestion' },
     { role: 'lightning', label: 'Fast agent tasks', provider: 'nvidia', model: 'nvidia/nemotron-3.5-lightning', rating: 4, isFree: false, notes: 'Lightweight model for code review, security, fast agent tasks' },
     { role: 'claude', label: 'Claude (Anthropic)', provider: 'openrouter', model: 'anthropic/claude-sonnet-4', rating: 5, isFree: false, notes: 'Balanced Anthropic model for coding and analysis' },
+    { role: 'hf-main', label: 'Hugging Face chat', provider: 'huggingface', model: 'Qwen/Qwen2.5-72B-Instruct', rating: 5, isFree: true, notes: 'HF — verified FREE on a Basic token; bring your own HF token (Settings → Hugging Face)' },
+    { role: 'hf-fast', label: 'HF fast model', provider: 'huggingface', model: 'meta-llama/Llama-3.1-8B-Instruct', rating: 4, isFree: true, notes: 'HF — verified FREE on a Basic token' },
     { role: 'embed', label: 'RAG embedding', provider: 'openrouter', model: 'nvidia/nemotron-3-embed-1b', dims: 2048, rating: 5, notes: '2048-dim, 32768 context — the active index model' },
     { role: 'embed-multi', label: 'Multilingual embedding', provider: 'nvidia', model: 'nvidia/llama-nemotron-embed-1b-v2', dims: 1024, rating: 5, notes: 'Strong multilingual retrieval (different dims — needs reindex)' },
     { role: 'rerank', label: 'RAG reranking', provider: 'openrouter', model: 'nvidia/llama-nemotron-rerank-vl-1b-v2', rating: 5, notes: 'Re-scores retrieval results for precision' },
@@ -174,7 +200,7 @@ export class ModelsController {
   @Get('openrouter')
   async getOpenRouterModels(): Promise<{ reachable: boolean; models: unknown[] }> {
     try {
-      const upstream = await fetch(`${this.ragUrl}/api/openrouter/models`, {
+      const upstream = await fetch(`${this.ragUrl}/api/models/openrouter`, {
         headers: { 'content-type': 'application/json' },
         signal: AbortSignal.timeout(3000),
       });
@@ -191,19 +217,50 @@ export class ModelsController {
 
   @Get('omniroute')
   async getOmniRouteModels(): Promise<{ reachable: boolean; models: unknown[] }> {
+    // Internally fetch the REAL OmniRoute gateway (:20128/v1/models) with the
+    // provisioned manage key and feed its model list to the UI. The gateway is
+    // auto-started + keyed by OmniRouteService on login/bootstrap, so this is
+    // the authoritative set of models the agent/chat can actually use.
+    const base = (process.env.OMNIROUTE_BASE_URL || 'http://localhost:20128/v1').replace(/\/+$/, '');
+    const key = process.env.OMNIROUTE_API_KEY || '';
     try {
-      const upstream = await fetch(`${this.ragUrl}/api/omniroute/models`, {
-        headers: { 'content-type': 'application/json' },
-        signal: AbortSignal.timeout(3000),
+      const res = await fetch(`${base}/models`, {
+        headers: { authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(8000),
       });
-      if (!upstream.ok) {
-        this.logger.warn(`rag-service /omniroute/models responded with ${upstream.status}`);
+      if (!res.ok) {
+        this.logger.warn(`real OmniRoute /models responded with ${res.status}`);
         return { reachable: false, models: [] };
       }
-      return (await upstream.json()) as { reachable: boolean; models: unknown[] };
+      const data = (await res.json()) as { data?: Array<{ id?: string }> };
+      const models: unknown[] = [];
+      const seen = new Set<string>();
+      for (const item of data.data || []) {
+        const id = String(item.id || '').trim();
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        const namespace = id.split('/', 1)[0].toLowerCase() || 'omniroute';
+        models.push({
+          id,
+          name: id,
+          provider: namespace,
+          isFree: isOmniRouteFreeModel(id, namespace),
+        });
+      }
+      return { reachable: true, models };
     } catch (err) {
-      this.logger.warn(`omniroute models lookup failed: ${err}`);
+      this.logger.warn(`real OmniRoute models lookup failed: ${err instanceof Error ? err.message : err}`);
       return { reachable: false, models: [] };
     }
   }
+}
+
+function isOmniRouteFreeModel(id: string, _namespace: string): boolean {
+  const lower = id.toLowerCase();
+  // OmniRoute marks a model as free when "free" appears as a distinct token in
+  // its id (e.g. auto/coding:free, auto/best-free, oc/mimo-v2.5-free,
+  // oc/nemotron-3-ultra-free). Namespaces alone (oc, auto, …) are NOT a free
+  // signal — oc/big-pickle, auto/pro-*, etc. are paid, so we must not flag
+  // every id that merely contains "auto" or lives in a known namespace.
+  return /(^|[/:._-])free([/._:-]|$)/.test(lower) || lower.endsWith(':free');
 }

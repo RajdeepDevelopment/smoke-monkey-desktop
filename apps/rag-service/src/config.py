@@ -3,6 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MODEL_CATALOG_DEFAULT = Path(__file__).parent / "config" / "model_catalog.json"
@@ -166,9 +167,34 @@ class Settings(BaseSettings):
     omniroute_base_url: str = "http://localhost:20128/v1"
     omniroute_api_key: str = "omniroute"
     omniroute_chat_model: str = "auto"
+    # Free models served by the local free gateway (/v1/chat/completions) and
+    # shown in the free-mode picker. Accepts both a comma-separated string and
+    # a JSON-array string, so the desktop launcher scripts can pass a tidy list
+    # like `["auto", "big-pickle", ...]`.
     omniroute_chat_models: str = (
-        "auto,auto/best-free,groq/llama-3.3-70b,lc/LongCat-Flash-Lite"
+        "auto,auto/best-free,big-pickle,deepseek-v4-flash-free,mimo-v2.5-free,"
+        "nemotron-3-ultra-free,laguna-s-2.1-free,"
+        "nvidia/nemotron-3-nano-30b-a3b,nvidia/nemotron-3-super-120b-a12b,"
+        "nvidia/nemotron-3-ultra-550b-a55b,"
+        "deepseek/deepseek-v4-flash:free,nvidia/nemotron-3-ultra-550b-a55b:free,"
+        "google/gemini-2.0-flash-lite:free,meta-llama/llama-4-scout-17b-16e:free,"
+        "mistralai/mistral-small-3.2:free"
     )
+
+    @field_validator("omniroute_chat_models", mode="before")
+    @classmethod
+    def _coerce_chat_models_list(cls, value: object) -> object:
+        """Accept a JSON-array string (`["auto", ...]`) as well as CSV."""
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("["):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, list):
+                    return ",".join(str(item).strip() for item in parsed if str(item).strip())
+        return value
 
     # OpenCode Zen (opencode.ai) — OpenAI-compatible endpoint serving the
     # recommended coding-agent models plus a set of free models.
@@ -197,6 +223,23 @@ class Settings(BaseSettings):
         "nemotron-3-ultra-free,nemotron-3.5-lightning-free,"
         "laguna-s-2.1-free,deepseek-v4-flash-free,"
         "muse-spark-1.2-contributor-free"
+    )
+
+    # Hugging Face (cloud) — OpenAI-compatible router for HF LLMs at
+    # router.huggingface.co ("serverless Inference" for chat tasks). The token
+    # is the user's HUGGING_FACE_TOKEN (Secret Manager / env). The same token
+    # also authorizes the per-model Inference API for video/voice/image
+    # generation (see the hugging_face agent sub-context).
+    huggingface_api_key: str = ""
+    huggingface_base_url: str = "https://router.huggingface.co/v1"
+    huggingface_chat_model: str = "Qwen/Qwen2.5-72B-Instruct"
+    huggingface_chat_models: str = (
+        "Qwen/Qwen2.5-72B-Instruct,Qwen/Qwen3-30B-A3B-Instruct-2507,Qwen/Qwen3-4B,"
+        "Qwen/Qwen2.5-Coder-32B-Instruct,meta-llama/Llama-3.3-70B-Instruct,"
+        "meta-llama/Llama-3.1-8B-Instruct,"
+        "mistralai/Mistral-Small-3.2-24B-Instruct-2509,"
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B,deepseek-ai/DeepSeek-V3,"
+        "HuggingFaceTB/SmolLM2-1.7B-Instruct,google/gemma-3-27b-it"
     )
 
     # NVIDIA NIM (cloud) — OpenAI-compatible chat/embeddings at
@@ -516,6 +559,20 @@ class Settings(BaseSettings):
     @property
     def model_catalog(self) -> dict[str, Any]:
         return load_model_catalog(self.model_catalog_path)
+
+    def chat_models_list(self, value: str) -> list[str]:
+        """Split a ``*_chat_models`` config string into a clean, de-duped list."""
+        seen: list[str] = []
+        for item in value.split(","):
+            model_id = item.strip()
+            if model_id and model_id not in seen:
+                seen.append(model_id)
+        return seen
+
+    @property
+    def free_chat_models(self) -> list[str]:
+        """Free models served by the built-in gateway (the free-mode picker)."""
+        return self.chat_models_list(self.omniroute_chat_models)
 
     def rag_mode_params(self, mode: str) -> dict[str, Any]:
         """Resolve per-mode retrieval tuning for `fast | balanced | deep`.

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { ApiKeysService } from '../keys/api-keys.service';
+import { SecretsService } from '../secrets/secrets.service';
 import { CitationJson, WebSourceJson } from '../conversations/message.entity';
 import { ConversationsService } from '../conversations/conversations.service';
 import { ChatDto } from './dto/chat.dto';
@@ -17,7 +18,12 @@ const PROVIDER_ENDPOINTS: Record<string, string> = {
   opencode: 'https://opencode.ai/zen/v1/chat/completions',
   xai: 'https://api.x.ai/v1/chat/completions',
   ollama: 'http://localhost:11434/v1/chat/completions',
-  omniroute: 'http://localhost:11434/v1/chat/completions',
+  // Hugging Face OpenAI-compatible router (serverless Inference for LLMs).
+  huggingface: 'https://router.huggingface.co/v1/chat/completions',
+  // Free mode ("OmniRoute") is the local rag-service free gateway (/v1) that the
+  // desktop spawns on RAG_SERVICE_URL. It is OpenAI-compatible and proxies to
+  // free providers using the user's saved BYOK key.
+  omniroute: `${process.env.RAG_SERVICE_URL || 'http://127.0.0.1:8643'}/v1/chat/completions`,
 };
 
 const PROVIDER_MODELS: Record<string, string> = {
@@ -27,7 +33,8 @@ const PROVIDER_MODELS: Record<string, string> = {
   opencode: 'deepseek-v4-flash-free',
   xai: 'grok-3',
   ollama: 'llama3.1',
-  omniroute: 'deepseek-chat-free',
+  huggingface: 'Qwen/Qwen2.5-72B-Instruct',
+  omniroute: 'auto',
 };
 
 @Injectable()
@@ -35,9 +42,20 @@ export class ChatService {
   private readonly logger = new Logger(ChatService.name);
   private readonly ragUrl = process.env.RAG_SERVICE_URL || 'http://localhost:8000';
 
+  /** HF tokens live in the Secret Manager (env fallback) — resolve for chat. */
+  private async resolveHuggingFaceKey(userId: string): Promise<string | null> {
+    try {
+      return await this.secrets.getHuggingFaceToken(userId);
+    } catch (err) {
+      this.logger.warn(`failed to resolve hugging face token: ${err}`);
+      return null;
+    }
+  }
+
   constructor(
     private readonly conversations: ConversationsService,
     private readonly keys: ApiKeysService,
+    private readonly secrets: SecretsService,
   ) {}
 
   async streamChat(
@@ -63,12 +81,12 @@ export class ChatService {
     write({ type: 'meta', conversationId: conversation.id });
 
     // Resolve API key
-    const CLOUD_PROVIDERS = ['openrouter', 'nvidia', 'openai', 'xai', 'gemini', 'opencode'];
+    const CLOUD_PROVIDERS = ['openrouter', 'nvidia', 'openai', 'xai', 'gemini', 'opencode', 'huggingface'];
     const isCloud = CLOUD_PROVIDERS.includes(dto.provider || '');
     let apiKey: string | null = null;
     if (isCloud) {
       try {
-        apiKey = (await this.keys.getKey(userId, dto.provider!)) || null;
+        apiKey = (await this.keys.getKey(userId, dto.provider!)) || (await this.resolveHuggingFaceKey(userId));
       } catch (err) {
         this.logger.warn(`failed to resolve user key for ${userId}: ${err}`);
         apiKey = null;
@@ -84,7 +102,9 @@ export class ChatService {
                 ? process.env.GEMINI_API_KEY
                 : dto.provider === 'opencode'
                   ? process.env.OPENCODE_API_KEY
-                  : process.env.OPENROUTER_API_KEY;
+                  : dto.provider === 'huggingface'
+                    ? process.env.HUGGING_FACE_TOKEN
+                    : process.env.OPENROUTER_API_KEY;
       if (!apiKey) apiKey = serverEnv || null;
       if (!apiKey) {
         const noKeyMsg =
@@ -98,7 +118,9 @@ export class ChatService {
                   ? 'No Gemini key configured. Add one in Settings or set GEMINI_API_KEY.'
                   : dto.provider === 'opencode'
                     ? 'No OpenCode key configured. Add one in Settings or set OPENCODE_API_KEY.'
-                    : 'No OpenRouter key configured. Add one in Settings or set OPENROUTER_API_KEY.';
+                    : dto.provider === 'huggingface'
+                      ? 'No Hugging Face token configured. Add one in Settings → Hugging Face (or set HUGGING_FACE_TOKEN).'
+                      : 'No OpenRouter key configured. Add one in Settings or set OPENROUTER_API_KEY.';
         write({ type: 'error', message: noKeyMsg });
         res.end();
         return;

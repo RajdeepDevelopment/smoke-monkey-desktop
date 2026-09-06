@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useWorkspace } from '../../hooks/useWorkspace';
+import { BrandIcon } from '../BrandIcon';
 import { FileIcon } from './FileIcon';
 import type { FileViewerType } from '../../lib/file-types';
 import { isEditableViewer } from '../../lib/file-types';
@@ -67,6 +68,7 @@ interface EditorAreaProps {
   gotoLine?: number | undefined;
   recentFiles?: string[];
   onQuickOpen?: () => void;
+  onOpenFile?: (path: string) => void;
   onAgentPrompt?: (prompt: string) => void;
   autoSave?: boolean;
   onToggleAutoSave?: () => void;
@@ -90,6 +92,7 @@ export const EditorArea = memo(function EditorArea({
   gotoLine,
   recentFiles,
   onQuickOpen,
+  onOpenFile,
   onAgentPrompt,
   autoSave,
   onToggleAutoSave,
@@ -412,6 +415,7 @@ export const EditorArea = memo(function EditorArea({
             onOpenRecent={(p) => {
               const idx = openFiles.findIndex((f) => f.path === p);
               if (idx >= 0) onSelectTab(idx);
+              else onOpenFile?.(p);
             }}
             onAgentPrompt={onAgentPrompt}
           />
@@ -450,11 +454,14 @@ function WelcomePane({
     <div className="flex h-full items-start justify-center overflow-y-auto scrollbar-thin">
       <div className="mt-[9vh] w-full max-w-xl px-8">
         {/* Brand */}
-        <div className="mb-6 text-center">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.35em] text-primary-hover">Smoke Monkey</p>
-          <h1 className="mt-1 text-xl font-semibold tracking-tight text-foreground">
-            Start building with your codebase
-          </h1>
+        <div className="mb-6 flex flex-col items-center gap-3">
+          <BrandIcon size={64} className="rounded-2xl" />
+          <div className="text-center">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.35em] text-primary-hover">Smoke Monkey</p>
+            <h1 className="mt-1 text-xl font-semibold tracking-tight text-foreground">
+              Start building with your codebase
+            </h1>
+          </div>
         </div>
 
         {/* Quick open */}

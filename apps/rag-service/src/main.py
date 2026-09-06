@@ -188,6 +188,10 @@ async def lifespan(app: FastAPI):
             openrouter_model=settings.openrouter_chat_model,
             nvidia_api_key=settings.nvidia_api_key,
             nvidia_model=settings.nvidia_chat_model,
+            opencode_api_key=settings.opencode_api_key,
+            opencode_model=settings.opencode_chat_model,
+            huggingface_api_key=settings.huggingface_api_key,
+            huggingface_model=settings.huggingface_chat_model,
             api_key=chat_key,
         )
     except ValueError as exc:

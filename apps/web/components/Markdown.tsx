@@ -13,6 +13,7 @@ import { IsolatedHtml } from './visuals/IsolatedHtml';
 import { MermaidDiagram } from './visuals/MermaidDiagram';
 import { StreamingVisual } from './visuals/StreamingVisual';
 import { TableWithExport } from './visuals/TableWithExport';
+import { FileCard, FileCardPlaceholder, FILE_MARKER_RE } from './visuals/FileCard';
 import {
   extractProjectName,
   parseFiles,
@@ -34,7 +35,9 @@ type Segment =
   | { kind: 'streaming'; lang: string }
   | { kind: 'streamingVisuals'; code: string }
   | { kind: 'streamingFiles'; files: FileEntry[]; projectName: string; metadata: ProjectMetadata | null }
-  | { kind: 'streamingMeta' };
+  | { kind: 'streamingMeta' }
+  | { kind: 'file'; path: string }
+  | { kind: 'streaming-file' };
 
 /**
  * Add-on extraction pattern, ported from RDS-Power-AI's MarkdownRenderer.
@@ -71,6 +74,10 @@ const MARKERS = [
   'File-Based-ed',
   'Project-Metadata-st',
   'Project-Metadata-ed',
+  'file-SM-st',
+  'file-sm-ed',
+  'pdf-SM-st',
+  'pdf-sm-ed',
 ];
 
 /** LLMs sometimes wrap marker blocks in a code fence — strip those fences so
@@ -96,8 +103,20 @@ function lastUnclosed(text: string, start: string, end: string, boundary?: (afte
 }
 
 interface OpenTail {
-  kind: 'visuals' | 'files' | 'metadata' | 'mermaid';
+  kind: 'visuals' | 'files' | 'metadata' | 'mermaid' | 'file';
   index: number;
+}
+
+/** True when the last <file-SM-st> open tag has no matching close yet. */
+function lastUnclosedFile(text: string): number {
+  const openRe = /<(?:pdf|file)-sm-st\s*>/gi;
+  let last = -1;
+  let m: RegExpExecArray | null;
+  while ((m = openRe.exec(text)) !== null) last = m.index;
+  if (last === -1) return -1;
+  const after = text.slice(last);
+  const closeRe = /<(?:pdf|file)-sm-ed\s*>/gi;
+  return closeRe.test(after) ? -1 : last;
 }
 
 /** Find the first (earliest) marker block that is still streaming. */
@@ -115,6 +134,9 @@ function detectTail(normalized: string): OpenTail | null {
 
   const mermaid = lastUnclosed(normalized, '```mermaid', '```', (after) => !after || /[\s]/.test(after[0]));
   if (mermaid !== -1) candidates.push({ kind: 'mermaid', index: mermaid });
+
+  const file = lastUnclosedFile(normalized);
+  if (file !== -1) candidates.push({ kind: 'file', index: file });
 
   if (candidates.length === 0) return null;
   candidates.sort((a, b) => a.index - b.index);
@@ -143,6 +165,7 @@ function buildTail(
     };
   }
   if (open.kind === 'metadata') return { kind: 'streamingMeta' };
+  if (open.kind === 'file') return { kind: 'streaming-file' };
   return { kind: 'streaming', lang: 'mermaid' };
 }
 
@@ -203,6 +226,11 @@ function segmentMain(main: string): { segments: Segment[]; metadata: ProjectMeta
         },
         end: m.index + m[0].length,
       };
+    });
+    scan(FILE_MARKER_RE, (m) => {
+      const path = (m[1] ?? '').trim();
+      if (!path) return null;
+      return { seg: { kind: 'file', path }, end: m.index + m[0].length };
     });
 
     return best;
@@ -288,6 +316,8 @@ function MarkdownBody({ content, components }: MarkdownProps) {
           );
         }
         if (seg.kind === 'streamingMeta') return <StreamingMetaAddon key={i} />;
+        if (seg.kind === 'file') return <FileCard key={i} path={seg.path} />;
+        if (seg.kind === 'streaming-file') return <FileCardPlaceholder key={i} />;
         return (
           <ErrorBoundary key={i}>
             <ReactMarkdown

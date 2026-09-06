@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Delete, Body, Param, Req, Sse, MessageEvent, Query, UseGuards, BadRequestException } from '@nestjs/common';
+import { Controller, Post, Get, Delete, Body, Param, Req, Sse, MessageEvent, Query, UseGuards, BadRequestException, Logger } from '@nestjs/common';
 import { Observable, filter, map } from 'rxjs';
 import { AgentService, AgentRunRequest } from './services/agent.service';
 import { AgentSessionService } from './services/agent-session.service';
@@ -8,6 +8,7 @@ import { AgentPermissionService } from './services/agent-permission.service';
 import { AgentEventEmitter, AgentEvent } from './services/agent-event.emitter';
 import { ContextCompactionService } from './services/compaction.service';
 import { ExplorerService } from './services/subagent.service';
+import { WorkspaceIndex } from './services/workspace-index';
 import { AgentId } from './entities/agent-session.entity';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -18,14 +19,38 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import * as fs from 'fs';
-import { OPENCODE_ZEN_MODEL_IDS } from '../../common/constants/opencode-models';
 import * as path from 'path';
+
+const FALLBACK_OMNIROUTE_MODELS = [
+  // Bundled free gate (freegate on /v1) — curated free ids (unprefixed, the
+  // exact ids /v1/models returns and _route_for accepts).
+  'big-pickle',
+  'deepseek-v4-flash-free',
+  'mimo-v2.5-free',
+  'nemotron-3-ultra-free',
+  'nemotron-3.5-lightning-free',
+  'muse-spark-1.2-contributor-free',
+  'laguna-s-2.1-free',
+  'hy3-free',
+  'ling-3.0-flash-fin-free',
+  // `:free` (OpenRouter free tier) and native free ids that also route.
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
+  'nvidia/nemotron-3-super-120b-a12b:free',
+  'nvidia/nemotron-3-nano-30b-a3b:free',
+  'deepseek/deepseek-v4-flash:free',
+  'google/gemini-2.0-flash-lite:free',
+  'meta-llama/llama-4-scout-17b-16e:free',
+  'mistralai/mistral-small-3.2:free',
+  'auto/best-free',
+];
 
 const execAsync = promisify(exec);
 
 @UseGuards(JwtAuthGuard)
 @Controller('agent')
 export class AgentController {
+  private readonly logger = new Logger(AgentController.name);
+
   constructor(
     private readonly agentService: AgentService,
     private readonly sessionService: AgentSessionService,
@@ -39,6 +64,7 @@ export class AgentController {
     private readonly fileChangeRepo: Repository<AgentFileChange>,
     @Inject(ToolRegistry)
     private readonly toolRegistry: ToolRegistry,
+    private readonly workspaceIndex: WorkspaceIndex,
   ) {}
 
   @Post('sessions')
@@ -54,6 +80,14 @@ export class AgentController {
   async listSessions(@Req() req: any) {
     const userId = req.user?.id || req.userId;
     return this.sessionService.findByUser(userId);
+  }
+
+  // NOTE: must be declared before `sessions/:id` or "search" gets captured
+  // as an id. Finds chats by the text INSIDE their messages, not just titles.
+  @Get('sessions/search')
+  async searchSessions(@Query('q') q: string, @Req() req: any) {
+    const userId = req.user?.id || req.userId;
+    return this.sessionService.searchChats(userId, q || '');
   }
 
   @Get('sessions/:id')
@@ -114,7 +148,19 @@ export class AgentController {
   }
 
   @Get('sessions/:id/messages')
-  async getMessages(@Param('id') sessionId: string) {
+  async getMessages(
+    @Param('id') sessionId: string,
+    @Query('beforeCreatedAt') beforeCreatedAt?: string,
+    @Query('beforeId') beforeId?: string,
+    @Query('limit') limit?: string,
+  ) {
+    if (beforeCreatedAt || beforeId) {
+      return this.messageService.findBySessionPage(sessionId, {
+        beforeCreatedAt,
+        beforeId,
+        limit: limit ? Number(limit) : undefined,
+      });
+    }
     return this.messageService.findBySession(sessionId);
   }
 
@@ -143,14 +189,15 @@ export class AgentController {
   @Sse('sessions/:id/events')
   streamEvents(@Param('id') sessionId: string): Observable<MessageEvent> {
     const eventTypes = [
-      'text.delta', 'text.end',
-      'tool.started', 'tool.output', 'tool.completed', 'tool.failed',
+      'text.delta', 'text.thought', 'context.updated', 'text.end',
+      'tool.started', 'tool.output', 'tool.progress', 'tool.completed', 'tool.failed',
       'permission.required',
       'run.started', 'run.completed', 'run.interrupted', 'run.failed',
       'step.started', 'step.ended',
       'llm.thinking',
       'ask_user.required', 'ask_user.response',
       'todo.updated',
+      'phase.changed', 'agent.state',
     ];
 
     return new Observable<MessageEvent>((subscriber) => {
@@ -167,6 +214,10 @@ export class AgentController {
         const eventName = `agent.session.${sessionId}.${eventType}`;
         const handler = (event: AgentEvent) => {
           try {
+            // TEMP DEBUG: confirm context events reach the SSE transport (remove after triage).
+            if (eventType === 'context.updated') {
+              this.logger.log(`[SSE->FE] context.updated for ${sessionId}: active=${JSON.stringify((event as any).data?.active ?? 'N/A')}`);
+            }
             subscriber.next({
               type: event.type,
               data: JSON.stringify(event),
@@ -228,87 +279,132 @@ export class AgentController {
     return this.toolRegistry.getDefinitions();
   }
 
+  /** Workspace index status for the active project — powers the UI chip that
+   *  shows the agent is backed by the SQLite code index. Builds/refreshes it
+   *  on demand (cheap, incremental) so the count is always current. */
+  @Get('workspace-index')
+  async getWorkspaceIndex(@Query('path') workspacePath?: string) {
+    if (!workspacePath) return { dbPath: '', workspaceId: '', files: 0, symbols: 0, imports: 0, exports: 0, lastBuilt: 0, ready: false };
+    try {
+      await this.workspaceIndex.build(workspacePath);
+      const stats = this.workspaceIndex.stats();
+      return {
+        dbPath: stats.dbPath,
+        workspaceId: stats.workspaceId,
+        files: stats.files,
+        symbols: stats.symbols,
+        imports: stats.imports,
+        exports: stats.exports,
+        lastBuilt: stats.lastBuilt,
+        ready: stats.files > 0,
+      };
+    } catch (err: any) {
+      return { dbPath: '', workspaceId: '', files: 0, symbols: 0, imports: 0, exports: 0, lastBuilt: 0, ready: false, error: String(err?.message ?? err) };
+    }
+  }
+
   @Get('models')
   async getModels() {
-    const ragUrl = process.env.RAG_SERVICE_URL || 'http://127.0.0.1:8643';
-    try {
-      const upstream = await fetch(`${ragUrl}/api/models`);
-      if (!upstream.ok) throw new Error('upstream not ok');
-      const data = await upstream.json();
-      if (data.providers?.length) return data;
-    } catch { /* fall through to desktop defaults */ }
+    // Agent-valid models ONLY: built from the provider allowlists in .env so
+    // the FE can never select a model the run backend will reject. The general
+    // chat catalog (which includes third-party free ids the agent doesn't
+    // support) is served by /api/models and is NOT used here.
+    const providers = [
+      {
+        id: 'nvidia',
+        label: 'NVIDIA NIM',
+        models: this.splitCsv(process.env.NVIDIA_CHAT_MODELS, [
+          'nvidia/nemotron-3-ultra-550b-a55b',
+          'nvidia/nemotron-3-super-120b-a12b',
+          'nvidia/nemotron-3-nano-30b-a3b',
+        ]),
+      },
+      {
+        id: 'openrouter',
+        label: 'OpenRouter',
+        models: this.splitCsv(process.env.OPENROUTER_CHAT_MODELS, [
+          'nvidia/nemotron-3-nano-30b-a3b:free',
+          'nvidia/nemotron-3-super-120b-a12b:free',
+          'deepseek/deepseek-v4-flash',
+          'deepseek/deepseek-v4-pro',
+          'z-ai/glm-5.2',
+          'nvidia/nemotron-3-ultra-550b-a55b',
+          'openrouter/free',
+        ]),
+      },
+      {
+        id: 'omniroute',
+        label: 'OmniRoute (free)',
+        models: await this.fetchOmniRouteModels(),
+      },
+      {
+        id: 'ollama',
+        label: 'Ollama (local)',
+        models: ['qwen3:32b', 'qwen3:8b', 'qwen3:4b'],
+      },
+    ].filter((p) => p.models.length > 0);
 
-    return {
-      providers: [
-        {
-          id: 'openrouter',
-          label: 'OpenRouter',
-          models: [
-            'anthropic/claude-sonnet-4.6',
-            'anthropic/claude-opus-4.6',
-            'openai/gpt-5.6-luna-pro',
-            'openai/gpt-5.6-luna',
-            'google/gemini-3.7-flash',
-            'google/gemini-3.6-flash',
-            'google/gemini-3.5-flash',
-            'google/gemini-3.5-flash-lite',
-            'x-ai/grok-4.6',
-            'qwen/qwen3-coder',
-            'deepseek/deepseek-v4-pro',
-          ],
-        },
-        {
-          id: 'nvidia',
-          label: 'NVIDIA NIM',
-          models: [
-            'nvidia/nemotron-3-ultra-550b-a55b',
-            'nvidia/nemotron-3-super-120b-a12b',
-            'nvidia/nemotron-3-nano-30b-a3b',
-          ],
-        },
-        {
-          id: 'openai',
-          label: 'OpenAI',
-          models: [
-            'gpt-5.6',
-            'gpt-5.6-luna',
-            'o3-pro',
-            'gpt-4o',
-          ],
-        },
-        {
-          id: 'xai',
-          label: 'xAI — Grok',
-          models: [
-            'grok-4.6',
-          ],
-        },
-        {
-          id: 'gemini',
-          label: 'Google Gemini',
-          models: [
-            'gemini-3.7-flash',
-            'gemini-3.6-flash',
-            'gemini-3.5-flash',
-            'gemini-3.5-flash-lite',
-          ],
-        },
-        {
-          id: 'opencode',
-          label: 'OpenCode Zen',
-          models: OPENCODE_ZEN_MODEL_IDS,
-        },
-        {
-          id: 'ollama',
-          label: 'Ollama (local)',
-          models: [
-            'qwen3:32b',
-            'qwen3:8b',
-            'qwen3:4b',
-          ],
-        },
-      ],
+    return { providers };
+  }
+
+  /** Live free/keyless model list from the local OmniRoute gateway
+   *  (localhost:20128/v1). Returns the full live catalog so the agent's model
+   *  picker and the run backend (which routes any model id) stay consistent —
+   *  if the agent picker showed only the allowlist subset, selecting any other
+   *  live model would be silently reverted by the FE's validity clamp.
+   *  Falls back to the curated allowlist when the gateway is offline. */
+  private async fetchOmniRouteModels(): Promise<string[]> {
+    const allowed = new Set(FALLBACK_OMNIROUTE_MODELS);
+    const base = (process.env.OMNIROUTE_BASE_URL || 'http://localhost:20128/v1').replace(/\/+$/, '');
+    const key = process.env.OMNIROUTE_API_KEY || 'omniroute';
+    try {
+      const res = await fetch(`${base}/models`, {
+        headers: { authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(4000),
+      });
+      if (!res.ok) return [...allowed];
+      const data = await res.json() as { data?: Array<{ id?: string }> };
+      const models = (data.data || [])
+        .map((m) => String(m.id || '').trim())
+        .filter(Boolean);
+      return models.length > 0 ? models : [...allowed];
+    } catch {
+      return [...allowed];
+    }
+  }
+
+  /** Content-type for file/asset responses, for the FE to render/download. */
+  private assetMime(filePath: string): string {
+    const ext = path.extname(filePath).toLowerCase();
+    const map: Record<string, string> = {
+      '.pdf': 'application/pdf',
+      '.ppt': 'application/vnd.ms-powerpoint',
+      '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      '.doc': 'application/msword',
+      '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      '.xls': 'application/vnd.ms-excel',
+      '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      '.csv': 'text/csv',
+      '.txt': 'text/plain',
+      '.md': 'text/markdown',
+      '.html': 'text/html',
+      '.json': 'application/json',
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.svg': 'image/svg+xml',
+      '.avif': 'image/avif',
+      '.ico': 'image/x-icon',
     };
+    return map[ext] ?? 'application/octet-stream';
+  }
+
+  /** Split a comma-separated env allowlist, falling back when empty. */
+  private splitCsv(raw?: string, fallback: string[] = []): string[] {
+    const list = (raw || '').split(',').map((m) => m.trim()).filter(Boolean);
+    return list.length > 0 ? list : fallback;
   }
 
   @Get('file/read')
@@ -321,6 +417,29 @@ export class AgentController {
       if (stat.size > 5 * 1024 * 1024) throw new BadRequestException('File too large (>5MB)');
       const content = fs.readFileSync(resolved, 'utf8');
       return { path: resolved, content };
+    } catch (err: any) {
+      if (err instanceof BadRequestException) throw err;
+      throw new BadRequestException(`Cannot read file: ${err?.message || err}`);
+    }
+  }
+
+  @Get('file/asset')
+  fileAsset(@Query('path') filePath: string) {
+    if (!filePath) throw new BadRequestException('path is required');
+    const resolved = path.resolve(filePath);
+    try {
+      const stat = fs.statSync(resolved);
+      if (stat.isDirectory()) throw new BadRequestException('Path is a directory');
+      if (stat.size > 5 * 1024 * 1024) throw new BadRequestException('File too large (>5MB)');
+      const data = fs.readFileSync(resolved);
+      return {
+        ok: true,
+        name: path.basename(resolved),
+        path: resolved,
+        mime: this.assetMime(resolved),
+        size: data.length,
+        b64: data.toString('base64'),
+      };
     } catch (err: any) {
       if (err instanceof BadRequestException) throw err;
       throw new BadRequestException(`Cannot read file: ${err?.message || err}`);
