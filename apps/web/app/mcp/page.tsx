@@ -22,6 +22,9 @@ import {
   Brain,
   Network,
   Workflow,
+  Cloud,
+  Server,
+  Plane,
   type LucideIcon,
 } from 'lucide-react';
 import {
@@ -31,6 +34,8 @@ import {
   FaDocker,
   FaFire,
   FaGlobe,
+  FaAws,
+  FaMicrosoft,
 } from 'react-icons/fa';
 import {
   SiPostgresql,
@@ -49,6 +54,13 @@ import {
   SiLucid,
   SiExcalidraw,
   SiMermaid,
+  SiCloudflare,
+  SiRender,
+  SiVercel,
+  SiSupabase,
+  SiNetlify,
+  SiRailway,
+  SiGooglecloud,
 } from 'react-icons/si';
 import type { IconType } from 'react-icons';
 import { ApifyIcon, isApify } from '../../components/BrandIconResolver';
@@ -89,6 +101,10 @@ interface Preset {
   dependency: string;
   /** Marks a remote host + OAuth-managed MCP server (special connect flow). */
   remote?: boolean;
+  /** Remote server that needs a manually pre-registered OAuth client. */
+  manualOAuth?: boolean;
+  /** OAuth scopes to request (override discovery) for manual-OAuth servers. */
+  oauthScopes?: string;
 }
 
 interface PresetCategory {
@@ -427,6 +443,150 @@ const PRESET_CATEGORIES: PresetCategory[] = [
       },
     ],
   },
+  {
+    label: 'Cloudflare',
+    icon: Cloud,
+    accent: 'text-orange-400',
+    presets: [
+      {
+        label: 'Cloudflare API',
+        name: 'cloudflare-api',
+        description: 'Full Cloudflare API — DNS, Workers, R2, Zero Trust and 2,500+ endpoints via OAuth login',
+        transport: 'http',
+        command: '',
+        args: [],
+        envKeys: [],
+        url: 'https://mcp.cloudflare.com/mcp',
+        dependency: 'Remote · OAuth (mcp.cloudflare.com)',
+        remote: true,
+      },
+    ],
+  },
+  {
+    label: 'Hosting & Backend',
+    icon: Server,
+    accent: 'text-emerald-400',
+    presets: [
+      {
+        label: 'Render',
+        name: 'render',
+        description: 'Deploy and manage web services, static sites, cron jobs and managed Postgres/Redis — hosts the Smoke Monkey backend',
+        transport: 'http',
+        command: '',
+        args: [],
+        envKeys: [],
+        url: 'https://mcp.render.com/mcp',
+        dependency: 'Remote · OAuth (mcp.render.com)',
+        remote: true,
+      },
+      {
+        label: 'Supabase',
+        name: 'supabase',
+        description: 'Hosted Postgres, auth, storage and edge functions — query tables, run SQL, apply migrations via OAuth login',
+        transport: 'http',
+        command: '',
+        args: [],
+        envKeys: [],
+        url: 'https://mcp.supabase.com/mcp',
+        dependency: 'Remote · OAuth (mcp.supabase.com)',
+        remote: true,
+      },
+      {
+        label: 'Netlify',
+        name: 'netlify',
+        description: 'Deploy static sites and serverless functions — manage projects, build hooks and environment variables (opens browser for OAuth)',
+        command: 'npx',
+        args: ['-y', '@netlify/mcp'],
+        envKeys: ['NETLIFY_AUTH_TOKEN'],
+        keyGetUrl: 'https://app.netlify.com/user/applications#personal-access-tokens',
+        keyGetLabel: 'Personal access token',
+        dependency: 'npx -y @netlify/mcp',
+      },
+      {
+        label: 'Vercel',
+        name: 'vercel',
+        description: 'Deploy the web app to Vercel and manage projects, deployments, environment variables and logs via OAuth login',
+        transport: 'http',
+        command: '',
+        args: [],
+        envKeys: [],
+        url: 'https://mcp.vercel.com',
+        dependency: 'Remote · OAuth (mcp.vercel.com)',
+        remote: true,
+      },
+      {
+        label: 'Railway',
+        name: 'railway',
+        description: 'Deploy full-stack apps, services and databases on Railway — manage projects, variables and deploys via OAuth (free $5/mo credit)',
+        transport: 'http',
+        command: '',
+        args: [],
+        envKeys: [],
+        url: 'https://mcp.railway.com',
+        dependency: 'Remote · OAuth (mcp.railway.com)',
+        remote: true,
+      },
+      {
+        label: 'Fly.io',
+        name: 'fly',
+        description: 'Provision Fly apps, machines, volumes and secrets — deploy and scale the backend on Fly (free allowance then paid)',
+        command: 'fly',
+        args: ['mcp', 'server'],
+        envKeys: ['FLY_ACCESS_TOKEN'],
+        keyGetUrl: 'https://fly.io/docs/security/tokens/',
+        keyGetLabel: 'Personal access token (optional)',
+        dependency: 'fly mcp server',
+      },
+      {
+        label: 'AWS',
+        name: 'aws-nx',
+        description: 'Official AWS Nx Plugin — scaffold full-stack apps with Lambda/API Gateway + CDK/S3 and deploy to AWS (free tier + paid)',
+        command: 'npx',
+        args: ['-y', '@aws/nx-plugin-mcp'],
+        envKeys: ['AWS_PROFILE', 'AWS_REGION'],
+        keyGetLabel: 'Uses ~/.aws credentials',
+        dependency: 'npx -y @aws/nx-plugin-mcp',
+      },
+      {
+        label: 'Azure',
+        name: 'azure',
+        description: 'Official Azure MCP — manage App Service, compute, databases and more for hosting backends (signs in via az login or env vars)',
+        command: 'npx',
+        args: ['-y', '@azure/mcp@latest', 'server', 'start'],
+        envKeys: ['AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET'],
+        keyGetLabel: 'Uses az login or service principal env vars',
+        dependency: 'npx -y @azure/mcp server start',
+      },
+      {
+        label: 'Google BigQuery',
+        name: 'bigquery',
+        description: 'Official Google Cloud MCP — query BigQuery datasets, run SQL and ML analytics (needs a pre-registered Google OAuth client)',
+        transport: 'http',
+        command: '',
+        args: [],
+        envKeys: [],
+        url: 'https://bigquery.googleapis.com/mcp',
+        dependency: 'Remote · Manual OAuth (bigquery.googleapis.com)',
+        remote: true,
+        manualOAuth: true,
+        oauthScopes: 'https://www.googleapis.com/auth/cloud-platform',
+      },
+      {
+        label: 'Google Cloud SQL',
+        name: 'cloudsql',
+        description: 'Official Google Cloud MCP — create, manage and query Cloud SQL instances (managed Postgres/MySQL for the backend)',
+        transport: 'http',
+        command: '',
+        args: [],
+        envKeys: [],
+        url: 'https://sqladmin.googleapis.com/mcp',
+        dependency: 'Remote · Manual OAuth (sqladmin.googleapis.com)',
+        remote: true,
+        manualOAuth: true,
+        oauthScopes: 'https://www.googleapis.com/auth/cloud-platform',
+      },
+    ],
+  },
 ];
 
 const TOTAL_PRESETS = PRESET_CATEGORIES.reduce((n, c) => n + c.presets.length, 0);
@@ -457,6 +617,17 @@ const BRAND_LOOKUP: Record<string, { Icon: IconType; color: string }> = {
   'playwright':{ Icon: SiBrave,  color: 'text-[#FB542B]' },
   'sqlite':  { Icon: SiSqlite,   color: 'text-[#003B57]' },
   'memory':  { Icon: Brain,      color: 'text-[#FBBF24]' },
+  'cloudflare': { Icon: SiCloudflare, color: 'text-[#F6821F]' },
+  'render':    { Icon: SiRender, color: 'text-[#1D2B39]' },
+  'vercel':    { Icon: SiVercel, color: 'text-white' },
+  'supabase':  { Icon: SiSupabase, color: 'text-[#3ECF8E]' },
+  'netlify':   { Icon: SiNetlify, color: 'text-[#00C7B7]' },
+  'railway':   { Icon: SiRailway, color: 'text-white' },
+  'fly':       { Icon: Plane, color: 'text-[#A21CAF]' },
+  'aws':       { Icon: FaAws, color: 'text-[#FF9900]' },
+  'azure':     { Icon: FaMicrosoft, color: 'text-[#0078D4]' },
+  'bigquery':  { Icon: SiGooglecloud, color: 'text-[#4285F4]' },
+  'cloudsql':  { Icon: SiGooglecloud, color: 'text-[#4285F4]' },
 };
 
 function brandFor(name: string): { Icon: IconType; color: string } {
@@ -483,6 +654,10 @@ export default function McpPage() {
   const [formEnv, setFormEnv] = useState<Array<{ key: string; value: string }>>([]);
   const [formTransport, setFormTransport] = useState<'stdio' | 'http'>('stdio');
   const [formUrl, setFormUrl] = useState('');
+  const [formManualOAuth, setFormManualOAuth] = useState(false);
+  const [formOauthClientId, setFormOauthClientId] = useState('');
+  const [formOauthClientSecret, setFormOauthClientSecret] = useState('');
+  const [formOauthScopes, setFormOauthScopes] = useState('');
   const [saving, setSaving] = useState(false);
   const [oauthConnecting, setOauthConnecting] = useState<string | null>(null);
   const [oauthPolling, setOauthPolling] = useState<string | null>(null);
@@ -528,11 +703,19 @@ export default function McpPage() {
         args: formTransport === 'http' ? [] : args,
         env: formTransport === 'http' ? undefined : Object.keys(env).length > 0 ? env : undefined,
         url: formTransport === 'http' ? formUrl.trim() : undefined,
+        ...(formManualOAuth
+          ? {
+              oauthClientId: formOauthClientId.trim() || undefined,
+              oauthClientSecret: formOauthClientSecret.trim() || undefined,
+              oauthScopes: formOauthScopes.trim() || undefined,
+            }
+          : {}),
       });
       toast.success(`MCP server "${formName}" created`);
       setShowAddForm(false);
       setFormName(''); setFormDesc(''); setFormCommand('npx'); setFormArgs(''); setFormEnv([]);
       setFormTransport('stdio'); setFormUrl('');
+      setFormManualOAuth(false); setFormOauthClientId(''); setFormOauthClientSecret(''); setFormOauthScopes('');
       loadServers();
     } catch (err) {
       toast.error('Failed to create MCP server');
@@ -627,6 +810,10 @@ export default function McpPage() {
     setFormCommand(sample.command || 'npx');
     setFormArgs(sample.args.join(' '));
     setFormEnv(sample.envKeys.map((k) => ({ key: k, value: '' })));
+    setFormManualOAuth(!!sample.manualOAuth);
+    setFormOauthClientId('');
+    setFormOauthClientSecret('');
+    setFormOauthScopes(sample.oauthScopes ?? '');
     setShowAddForm(true);
     requestAnimationFrame(() => {
       if (!isRemote && sample.envKeys.length > 0 && envRef.current) {
@@ -798,6 +985,42 @@ export default function McpPage() {
                     className="w-full rounded-lg border border-slate-700/60 bg-slate-900/80 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
                   />
                   <p className="mt-1 text-[11px] text-yellow-400">You will connect via OAuth after saving. No command required.</p>
+                  {formManualOAuth && (
+                    <>
+                      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                        <div>
+                          <label className="mb-1.5 block text-xs font-medium text-slate-400">OAuth Client ID</label>
+                          <input
+                            value={formOauthClientId}
+                            onChange={(e) => setFormOauthClientId(e.target.value)}
+                            placeholder="4xxxxxx.apps.googleusercontent.com"
+                            className="w-full rounded-lg border border-slate-700/60 bg-slate-900/80 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1.5 block text-xs font-medium text-slate-400">OAuth Client Secret</label>
+                          <input
+                            type="password"
+                            value={formOauthClientSecret}
+                            onChange={(e) => setFormOauthClientSecret(e.target.value)}
+                            placeholder="GOCSPX-..."
+                            className="w-full rounded-lg border border-slate-700/60 bg-slate-900/80 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                          />
+                        </div>
+                        <div className="sm:col-span-2">
+                          <label className="mb-1.5 block text-xs font-medium text-slate-400">OAuth Scopes</label>
+                          <input
+                            value={formOauthScopes}
+                            onChange={(e) => setFormOauthScopes(e.target.value)}
+                            placeholder="https://www.googleapis.com/auth/cloud-platform"
+                            className="w-full rounded-lg border border-slate-700/60 bg-slate-900/80 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                          />
+                          <p className="mt-1 text-[11px] text-slate-400">Create a Google Cloud "Web application" OAuth client and add the redirect URI:</p>
+                          <code className="mt-1 block rounded bg-slate-800/80 px-2 py-1 text-[11px] text-cyan-300">http://127.0.0.1:8642/api/mcp/oauth/callback</code>
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
               ) : (
                 <>

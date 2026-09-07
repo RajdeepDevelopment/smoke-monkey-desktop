@@ -42,6 +42,18 @@ export class CreateMcpServerDto {
   url?: string;
 
   @IsOptional()
+  @IsString()
+  oauthClientId?: string;
+
+  @IsOptional()
+  @IsString()
+  oauthClientSecret?: string;
+
+  @IsOptional()
+  @IsString()
+  oauthScopes?: string;
+
+  @IsOptional()
   @IsBoolean()
   enabled?: boolean;
 }
@@ -76,6 +88,18 @@ export class UpdateMcpServerDto {
   @IsOptional()
   @IsUrl({ require_tld: false })
   url?: string;
+
+  @IsOptional()
+  @IsString()
+  oauthClientId?: string;
+
+  @IsOptional()
+  @IsString()
+  oauthClientSecret?: string;
+
+  @IsOptional()
+  @IsString()
+  oauthScopes?: string;
 
   @IsOptional()
   @IsBoolean()

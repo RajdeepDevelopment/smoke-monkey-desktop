@@ -2394,6 +2394,7 @@ jq for JSON
 git diff for changes
 git status before risky operations
 pnpm/npm/yarn according to the project's lockfile
+pnpm search / npm search for the CORRECT library name & version (MANDATORY before adding any dependency)
 
 Use pipelines and && when operations depend on each other.
 
@@ -2443,6 +2444,14 @@ Package / build / test:
   pnpm test / pnpm test -- --run
   pnpm build / next build / vite build
   pnpm lint / pnpm typecheck
+
+FIND THE CORRECT LIBRARY — MUST USE, never guess:
+  pnpm search <name>   (or: npm search <name> to match the lockfile)
+  ALWAYS search the registry BEFORE adding any dependency to confirm the
+  package exists, its exact name, and the latest/appropriate version. Never
+  invent a name, version, or API from memory — a wrong guess is a failed
+  install and wasted steps. After installing, read its real API from
+  node_modules/<pkg>/README / types before using it.
 
 Package manager install errors — READ THE OFFSET AND FIX THE FILE:
   If pnpm i / npm i / yarn fails with
@@ -3071,6 +3080,14 @@ when that decision is made. Core rule right here: prefer battle-tested
 libraries already proven in this project over inventing your own, and verify a
 library is actually installed before you rely on it.
 
+MANDATORY before adding any library: run
+  pnpm search <name>   (or: npm search <name> to match the project's lockfile)
+to confirm the correct package name and current version — then read its real
+API from node_modules/<pkg>/README or its type definitions before writing any
+code against it. Never guess a library's name, version, or API from memory.
+If pnpm/npm is not reachable, inspect the installed registry docs under
+node_modules instead — but a fresh search is always required.
+
 ==================================================
 22. BACKEND SCALE & MICROSERVICES
 ==================================================
@@ -3182,6 +3199,11 @@ RULES:
   blocked until you close one (swap one-in, one-out).
 - Every turn shows a SUB-CONTEXT PANEL with your ACTIVE list and the AVAILABLE
   catalog. Read it and act on the state it shows — do not guess.
+- EVERY LOOP, validate the SUB-CONTEXT PANEL id by id: for each ACTIVE
+  sub-context ask "is this required for the CURRENT step?" — if it is NOT
+  required at the moment, deactivate it right away; if the current step needs
+  guidance that is missing, activate it. Never leave a sub-context hanging
+  around "just in case" — keep active exactly what the current step needs.
 - Never open sub-contexts "just in case" in bulk — 2-${MAX_ACTIVE_CONTEXTS} well-chosen ones for the
   task, and close the ones you've stopped using.
 
@@ -3261,6 +3283,12 @@ RULES:
 - When an MCP server's context is active, its tools become available to you.
 - Tool calls use the format: <serverName>__<toolName> (double underscore).
 - Deactivate an MCP server when its tools are no longer needed to free a slot.
+- MCP OVER RAW (CRITICAL PRIORITY): whenever a task can be accomplished through
+  an available MCP server's tools, PREFER that MCP tool over raw/manual methods
+  (hand-written terminal commands, manual HTTP requests, by-hand SQL, raw file
+  scraping). Using the right MCP is the intended way to do the work — it is
+  significantly better than doing the equivalent work by hand. Only fall back to
+  raw methods when no active MCP tool covers the task.
 ` : ''}
 
 Remember:

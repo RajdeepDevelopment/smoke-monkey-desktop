@@ -35,6 +35,8 @@ export interface McpOAuthMetadata {
   tokenEndpoint: string;
   registrationEndpoint?: string;
   scopesSupported?: string[];
+  /** Scopes advertised by the protected resource (not the auth server). */
+  resourceScopes?: string[];
   tokenEndpointAuthMethods?: string[];
 }
 
@@ -255,6 +257,9 @@ export async function discoverOAuthMetadata(url: string, logger: Logger): Promis
     tokenEndpoint: meta.token_endpoint,
     registrationEndpoint: meta.registration_endpoint,
     scopesSupported: meta.scopes_supported,
+    // Prefer the protected-resource scope list: providers such as Supabase and
+    // Railway only accept their resource's scopes (not the auth server's).
+    resourceScopes: resource.scopes_supported,
     tokenEndpointAuthMethods: meta.token_endpoint_auth_methods_supported,
   };
 }
@@ -273,7 +278,7 @@ export async function registerOAuthClient(
     grant_types: ['authorization_code', 'refresh_token'],
     response_types: ['code'],
     token_endpoint_auth_method: 'client_secret_post',
-    scope: (metadata.scopesSupported ?? []).filter((s) => !s.startsWith('openid')).join(' '),
+    scope: (metadata.resourceScopes ?? metadata.scopesSupported ?? []).filter((s) => !s.startsWith('openid')).join(' '),
   };
   const res = await fetch(metadata.registrationEndpoint, {
     method: 'POST',
@@ -329,29 +334,22 @@ export async function exchangeOAuthCode(metadata: McpOAuthMetadata, opts: {
   redirectUri: string;
   verifier: string;
 }): Promise<{ accessToken: string; refreshToken: string | null; expiresIn: number }> {
-  const params = new URLSearchParams({
-    grant_type: 'authorization_code',
-    code: opts.code,
-    redirect_uri: opts.redirectUri,
-    client_id: opts.clientId,
-    client_secret: opts.clientSecret,
-    code_verifier: opts.verifier,
-  });
-  const res = await fetch(metadata.tokenEndpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-    body: params.toString(),
-  });
-  const json = (await res.json().catch(() => ({}))) as {
-    access_token?: string;
-    refresh_token?: string;
-    expires_in?: number;
-    error?: string;
-    error_description?: string;
+  const attempt = async (useSecret: boolean): Promise<Response> => {
+    const params = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: opts.code,
+      redirect_uri: opts.redirectUri,
+      client_id: opts.clientId,
+      code_verifier: opts.verifier,
+    });
+    if (useSecret && opts.clientSecret) params.set('client_secret', opts.clientSecret);
+    return fetch(metadata.tokenEndpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      body: params.toString(),
+    });
   };
-  if (!res.ok || !json.access_token) {
-    throw new Error(`Token exchange failed: ${json.error_description ?? json.error ?? `HTTP ${res.status}`}`);
-  }
+  const json = await postWithConfidentialFallback(attempt, (b) => b.access_token, 'Token exchange failed');
   return {
     accessToken: json.access_token,
     refreshToken: json.refresh_token ?? null,
@@ -364,17 +362,48 @@ export async function refreshOAuthAccessTokenV2(metadata: McpOAuthMetadata, opts
   clientSecret: string;
   refreshToken: string;
 }): Promise<{ accessToken: string; refreshToken: string | null; expiresIn: number }> {
-  const params = new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: opts.refreshToken,
-    client_id: opts.clientId,
-    client_secret: opts.clientSecret,
-  });
-  const res = await fetch(metadata.tokenEndpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-    body: params.toString(),
-  });
+  const attempt = async (useSecret: boolean): Promise<Response> => {
+    const params = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: opts.refreshToken,
+      client_id: opts.clientId,
+    });
+    if (useSecret && opts.clientSecret) params.set('client_secret', opts.clientSecret);
+    return fetch(metadata.tokenEndpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      body: params.toString(),
+    });
+  };
+  const json = await postWithConfidentialFallback(attempt, (b) => b.access_token, 'Token refresh failed');
+  return {
+    accessToken: json.access_token,
+    refreshToken: json.refresh_token ?? opts.refreshToken,
+    expiresIn: json.expires_in ?? 3600,
+  };
+}
+
+/**
+ * POST to the token endpoint, first as a confidential client (secret in body).
+ * Some providers (e.g. Railway) silently register DCR clients as PUBLIC
+ * (`token_endpoint_auth_method: none`), so a `401 invalid_client` means we
+ * must retry once without the secret (PKCE-only).
+ */
+async function postWithConfidentialFallback(
+  attempt: (useSecret: boolean) => Promise<Response>,
+  access: (b: any) => string | undefined,
+  label: string,
+): Promise<{ access_token?: string; refresh_token?: string; expires_in?: number; error?: string; error_description?: string }> {
+  let res = await attempt(true);
+  if (res.status === 401) {
+    const first = (await res.json().catch(() => ({}))) as { error?: string; error_description?: string };
+    const clientAuthFailed = /invalid_client/i.test(`${first.error ?? ''} ${first.error_description ?? ''}`);
+    if (clientAuthFailed) {
+      res = await attempt(false);
+    } else {
+      throw new Error(`${label}: ${first.error_description ?? first.error ?? `HTTP ${res.status}`}`);
+    }
+  }
   const json = (await res.json().catch(() => ({}))) as {
     access_token?: string;
     refresh_token?: string;
@@ -382,14 +411,10 @@ export async function refreshOAuthAccessTokenV2(metadata: McpOAuthMetadata, opts
     error?: string;
     error_description?: string;
   };
-  if (!res.ok || !json.access_token) {
-    throw new Error(`Token refresh failed: ${json.error_description ?? json.error ?? `HTTP ${res.status}`}`);
+  if (!res.ok || !access(json)) {
+    throw new Error(`${label}: ${json.error_description ?? json.error ?? `HTTP ${res.status}`}`);
   }
-  return {
-    accessToken: json.access_token,
-    refreshToken: json.refresh_token ?? opts.refreshToken,
-    expiresIn: json.expires_in ?? 3600,
-  };
+  return json;
 }
 
 /**
@@ -604,6 +629,9 @@ export class McpService {
     env?: Record<string, string>;
     url?: string;
     enabled?: boolean;
+    oauthClientId?: string;
+    oauthClientSecret?: string;
+    oauthScopes?: string;
   }): Promise<McpServer> {
     const entity = this.repo.create({
       userId,
@@ -613,8 +641,11 @@ export class McpService {
       command: dto.command ?? '',
       argsJson: dto.args ? JSON.stringify(dto.args) : null,
       envJson: dto.env ? JSON.stringify(dto.env) : null,
-      url: dto.transport === 'http' ? (dto.url ?? null) : null,
-      enabled: dto.enabled ?? true,
+url: dto.transport === 'http' ? (dto.url ?? null) : null,
+    oauthClientId: dto.oauthClientId ?? null,
+    oauthClientSecret: dto.oauthClientSecret ?? null,
+    oauthScopes: dto.oauthScopes ?? null,
+    enabled: dto.enabled ?? true,
     });
     return this.repo.save(entity);
   }
@@ -630,6 +661,7 @@ export class McpService {
     enabled?: boolean;
     oauthClientId?: string;
     oauthClientSecret?: string;
+    oauthScopes?: string;
     oauthAccessToken?: string;
     oauthRefreshToken?: string;
     oauthExpiresAt?: number;
@@ -646,6 +678,7 @@ export class McpService {
     if (dto.enabled !== undefined) entity.enabled = dto.enabled;
     if (dto.oauthClientId !== undefined) entity.oauthClientId = dto.oauthClientId;
     if (dto.oauthClientSecret !== undefined) entity.oauthClientSecret = dto.oauthClientSecret;
+    if (dto.oauthScopes !== undefined) entity.oauthScopes = dto.oauthScopes;
     if (dto.oauthAccessToken !== undefined) entity.oauthAccessToken = dto.oauthAccessToken;
     if (dto.oauthRefreshToken !== undefined) entity.oauthRefreshToken = dto.oauthRefreshToken;
     if (dto.oauthExpiresAt !== undefined) entity.oauthExpiresAt = dto.oauthExpiresAt ? String(dto.oauthExpiresAt) : null;
@@ -789,7 +822,7 @@ export class McpService {
 
     const { verifier, challenge } = generatePkce();
     const state = require('crypto').randomBytes(24).toString('base64url');
-    const scope = (meta.scopesSupported ?? []).filter((s) => !s.startsWith('openid')).join(' ');
+    const scope = srv.oauthScopes || (meta.resourceScopes ?? meta.scopesSupported ?? []).filter((s) => !s.startsWith('openid')).join(' ');
     const authUrl = buildOAuthAuthorizeUrl(meta, {
       clientId,
       redirectUri,

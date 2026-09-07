@@ -25,10 +25,21 @@ import type {
   McpServersResponseDto,
   McpTestResultDto,
   McpOAuthStartResultDto,
+  ShareStatusDto,
+  ShareConfigDto,
+  TunnelStatusDto,
+  DeployPagesResultDto,
 } from '@rag/contracts';
 import { streamSse } from './sse';
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+/**
+ * API base. When served from the gateway itself (static web build + tunnel
+ * sharing, or a Cloudflare Pages deploy proxying /api), a relative base keeps
+ * all requests same-origin. The desktop shell overrides this via
+ * NEXT_PUBLIC_API_URL when the UI and gateway live on different origins, and
+ * its Rust proxy ignores the host anyway.
+ */
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 const TOKEN_KEY = 'rag_token';
 
@@ -538,12 +549,12 @@ export const api = {
   // ── MCP Servers ──────────────────────────────────────────────────────────
   listMcpServers: () =>
     request<McpServersResponseDto>('/api/mcp'),
-  createMcpServer: (data: { name: string; description?: string; transport?: 'stdio' | 'http'; command: string; args?: string[]; env?: Record<string, string>; url?: string }) =>
+  createMcpServer: (data: { name: string; description?: string; transport?: 'stdio' | 'http'; command: string; args?: string[]; env?: Record<string, string>; url?: string; oauthClientId?: string; oauthClientSecret?: string; oauthScopes?: string }) =>
     request<{ id: string; name: string }>('/api/mcp', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  updateMcpServer: (id: string, data: { name?: string; description?: string; transport?: 'stdio' | 'http'; command?: string; args?: string[]; env?: Record<string, string>; url?: string; enabled?: boolean }) =>
+  updateMcpServer: (id: string, data: { name?: string; description?: string; transport?: 'stdio' | 'http'; command?: string; args?: string[]; env?: Record<string, string>; url?: string; enabled?: boolean; oauthClientId?: string; oauthClientSecret?: string; oauthScopes?: string }) =>
     request<{ id: string; name: string }>(`/api/mcp/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
@@ -556,4 +567,43 @@ export const api = {
     request<McpOAuthStartResultDto>(`/api/mcp/${id}/oauth/start`, { method: 'POST' }),
   disconnectMcpOAuth: (id: string) =>
     request<{ status: string }>(`/api/mcp/${id}/oauth/disconnect`, { method: 'POST' }),
+
+  // ── Share / Hosting (Cloudflare) ────────────────────────────────────────
+  getShareStatus: () =>
+    request<ShareStatusDto>('/api/share'),
+  getShareConfig: () =>
+    request<ShareConfigDto>('/api/share/config'),
+  updateShareConfig: (data: {
+    projectName?: string;
+    accountId?: string;
+    apiToken?: string;
+    tunnelHostname?: string;
+    tunnelId?: string;
+    outputDir?: string;
+    pagesProjectName?: string;
+  }) =>
+    request<ShareConfigDto>('/api/share/config', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  startQuickTunnel: (url?: string) =>
+    request<TunnelStatusDto>('/api/share/tunnel/start', {
+      method: 'POST',
+      body: JSON.stringify(url ? { url } : {}),
+    }),
+  stopQuickTunnel: () =>
+    request<TunnelStatusDto>('/api/share/tunnel/stop', { method: 'POST' }),
+  startPersistentTunnel: () =>
+    request<TunnelStatusDto>('/api/share/tunnel/persistent/start', { method: 'POST' }),
+  stopPersistentTunnel: () =>
+    request<TunnelStatusDto>('/api/share/tunnel/persistent/stop', { method: 'POST' }),
+  deployToPages: (projectName?: string) =>
+    request<DeployPagesResultDto>('/api/share/deploy/pages', {
+      method: 'POST',
+      body: JSON.stringify(projectName ? { projectName } : {}),
+    }),
+  wranglerLogin: () =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/share/wrangler/login', { method: 'POST' }),
+  wranglerLogout: () =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/share/wrangler/logout', { method: 'POST' }),
 };

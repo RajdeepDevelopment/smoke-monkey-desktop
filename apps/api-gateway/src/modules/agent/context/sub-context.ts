@@ -211,7 +211,11 @@ LIBRARY SELECTION RULES:
 6. Do not upgrade unrelated dependencies during feature work.
 7. Read the existing project patterns before using a library "the standard way."
 8. Never invent an API: inspect the installed package or official docs when
-   behavior/version details matter.`,
+   behavior/version details matter.
+9. MUST USE before adding any dependency: pnpm search <name> (or
+   npm search <name> to match the project's lockfile) to confirm the exact
+   package name and current version — then read the REAL API from
+   node_modules/<pkg>/README or its types before writing code against it.`,
   },
   {
     id: 'frontend_ui',

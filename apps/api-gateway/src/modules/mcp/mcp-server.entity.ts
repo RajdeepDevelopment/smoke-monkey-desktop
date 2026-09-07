@@ -59,6 +59,11 @@ export class McpServer {
   @Column({ type: 'text', nullable: true })
   oauthClientSecret: string | null;
 
+  /** Scopes override sent during OAuth authorization (http servers, for
+   *  providers that don't advertise scopes — e.g. Google Cloud MCP). */
+  @Column({ type: 'text', nullable: true })
+  oauthScopes: string | null;
+
   /** OAuth access token used as the Bearer credential (http servers). */
   @Column({ type: 'text', nullable: true })
   oauthAccessToken: string | null;

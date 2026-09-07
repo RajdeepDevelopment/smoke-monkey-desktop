@@ -20,6 +20,7 @@ import {
   Globe,
   Code2,
   Plug,
+  Share2,
   type LucideIcon,
 } from 'lucide-react';
 import { BrandIcon } from './BrandIcon';
@@ -43,6 +44,7 @@ export const NAV: NavItem[] = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/agent', label: 'Agent', icon: Code2 },
   { href: '/mcp', label: 'MCP', icon: Plug },
+  { href: '/share', label: 'Share', icon: Share2 },
   { href: '/documents', label: 'Knowledge Base', icon: BookOpen },
   { href: '/models', label: 'Models', icon: Cpu },
   { href: '/playground', label: 'Playground', icon: Zap },

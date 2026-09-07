@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  Logger,
   Param,
   Post,
   Put,
@@ -14,6 +15,7 @@ import {
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { McpService } from './mcp.service';
+import { McpServer } from './mcp-server.entity';
 import { CreateMcpServerDto, UpdateMcpServerDto } from './dto/mcp.dto';
 import { Response } from 'express';
 
@@ -104,6 +106,8 @@ export class McpController {
 // Mounted via separate non-authenticated controller
 @Controller('mcp/oauth')
 export class McpOAuthPublicController {
+  private readonly logger = new Logger(McpOAuthPublicController.name);
+
   constructor(private readonly mcp: McpService) {}
 
   @Get('callback')
@@ -116,12 +120,23 @@ export class McpOAuthPublicController {
       res.status(400).send(this.oauthPage(false, '', 'Connection failed'));
       return;
     }
-    const server = await this.mcp.completeOAuthFlow(code, state);
+    let server: McpServer | null = null;
+    let failReason = '';
+    try {
+      server = await this.mcp.completeOAuthFlow(code, state);
+      if (!server) failReason = 'Authorization expired — click Connect again.';
+    } catch (err) {
+      this.logger.error(`MCP OAuth callback failed: ${err instanceof Error ? err.message : String(err)}`);
+      failReason = 'Token exchange failed — click Connect to retry.';
+    }
     const ok = !!server;
-    res.status(200).send(this.oauthPage(ok, server?.name ?? '', ok ? 'Connected!' : 'Connection failed', server?.id));
+    const body = ok
+      ? this.oauthPage(true, server!.name, 'Connected!', server!.id)
+      : this.oauthPage(false, '', 'Connection failed', undefined, failReason);
+    res.status(ok ? 200 : 400).send(body);
   }
 
-  private oauthPage(ok: boolean, name: string, title: string, serverId?: string): string {
+  private oauthPage(ok: boolean, name: string, title: string, serverId?: string, failReason?: string): string {
     const accent = ok ? '#10b981' : '#f59e0b';
     const icon = ok
       ? `<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -142,7 +157,7 @@ export class McpOAuthPublicController {
            Return to Smoke Monkey
          </button>
          <p style="margin:0;color:#64748b;font-size:12px">Or press <span style="color:#94a3b8">⌘W</span> / <span style="color:#94a3b8">Ctrl+W</span> to close this tab.</p>`
-      : `<p style="margin:8px 0 24px;color:#94a3b8;font-size:13px">The session may have expired. Open Smoke Monkey and try connecting again.</p>
+      : `<p style="margin:8px 0 24px;color:#94a3b8;font-size:13px">${failReason ?? 'The session may have expired. Open Smoke Monkey and try connecting again.'}</p>
          <button onclick="window.close()"
                  style="width:100%;padding:10px 18px;border:none;border-radius:8px;background:#334155;color:#e2e8f0;font-size:14px;font-weight:500;cursor:pointer">
            Close Tab

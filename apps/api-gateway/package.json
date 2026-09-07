@@ -27,6 +27,7 @@
     "better-sqlite3": "11",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
+    "express": "^4.19.2",
     "glob": "^13.0.6",
     "ioredis": "^5.4.1",
     "minio": "^8.0.0",

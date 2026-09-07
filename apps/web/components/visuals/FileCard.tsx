@@ -309,8 +309,8 @@ export const FileCard = memo(function FileCard({ path, onOpenInEditor }: FileCar
   const open = useFileAction();
   const reveal = useFileAction();
   const download = useFileAction();
+  const openInEditor = useFileAction();
   const revealLabel = isWindows() ? 'Show in Explorer' : isMac() ? 'Show in Finder' : 'Show in File Manager';
-  const editable = !!onOpenInEditor && isEditableViewer(getFileViewerType(path));
   const isImage = IMAGE_EXTS.has(fileExt(path));
   const isVideo = VIDEO_EXTS.has(fileExt(path));
   const isAudio = AUDIO_EXTS.has(fileExt(path));
@@ -318,6 +318,19 @@ export const FileCard = memo(function FileCard({ path, onOpenInEditor }: FileCar
   const runDownload = () =>
     download.run(async () => {
       downloadAgentAsset(await fetchAgentAsset(path));
+    });
+
+  /** Open the file in the in-app editor whenever a handler is wired up. If the
+   *  editor read fails (remote profile, path not in this workspace yet), fall
+   *  back to launching the OS-default app so the action always "works". */
+  const runOpenInEditor = () =>
+    openInEditor.run(async () => {
+      if (!onOpenInEditor) return;
+      try {
+        await onOpenInEditor(path);
+      } catch {
+        await ideApi.openFile(path);
+      }
     });
 
   return (
@@ -365,13 +378,15 @@ export const FileCard = memo(function FileCard({ path, onOpenInEditor }: FileCar
           {reveal.busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <FolderOpen className="h-3 w-3" />}
           {revealLabel}
         </button>
-        {editable && (
+        {onOpenInEditor && (
           <button
-            onClick={() => onOpenInEditor?.(path)}
-            className="inline-flex items-center gap-1.5 rounded-md bg-surface-800 px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-surface-700 hover:text-foreground"
+            onClick={runOpenInEditor}
+            disabled={openInEditor.busy}
+            title="Open in the in-app editor (falls back to your default app)"
+            className="inline-flex items-center gap-1.5 rounded-md bg-surface-800 px-2.5 py-1 text-[11px] text-ink-muted transition-colors hover:bg-surface-700 hover:text-foreground disabled:opacity-50"
           >
-            <Code2 className="h-3 w-3" />
-            Open in Editor
+            {openInEditor.busy ? <Loader2 className="h-3 w-3 animate-spin" /> : openInEditor.done ? <Check className="h-3 w-3" /> : <Code2 className="h-3 w-3" />}
+            {openInEditor.done ? 'Opened' : 'Open in Editor'}
           </button>
         )}
       </div>

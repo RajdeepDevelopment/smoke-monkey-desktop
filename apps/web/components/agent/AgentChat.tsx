@@ -345,9 +345,15 @@ function ToolRow({ tc, startTime, onFileSelect }: { tc: TcShape; startTime?: num
   const command = (tc.toolName === 'run_command' || tc.toolName === 'run_test' || tc.toolName === 'ssh_run' || tc.toolName === 'docker_exec')
     ? (typeof tc.arguments === 'object' && tc.arguments !== null ? (tc.arguments as Record<string, unknown>).command : undefined)
     : undefined;
-  const filePath = typeof tc.arguments === 'object' && tc.arguments !== null
-    ? (tc.arguments as Record<string, unknown>).path || (tc.arguments as Record<string, unknown>).filePath
-    : undefined;
+  const filePath = (() => {
+    if (typeof tc.arguments !== 'object' || tc.arguments === null) return undefined;
+    const a = tc.arguments as Record<string, unknown>;
+    for (const k of ['path', 'filePath', 'relativePath', 'file', 'target']) {
+      const v = a[k];
+      if (typeof v === 'string' && v) return v;
+    }
+    return undefined;
+  })();
   const argsStr = typeof tc.arguments === 'object' && tc.arguments !== null ? JSON.stringify(tc.arguments, null, 2) : String(tc.arguments || '');
   const duration = startTime && status !== 'active' ? formatDuration(Date.now() - startTime) : null;
   const outputDiff = EDIT_TOOLS.has(tc.toolName) ? extractDiffBlock(tc.output || '') : null;
@@ -493,12 +499,12 @@ function ToolRow({ tc, startTime, onFileSelect }: { tc: TcShape; startTime?: num
               </pre>
             </div>
           )}
-          {typeof filePath === 'string' && onFileSelect && status === 'ok' && (
+          {typeof filePath === 'string' && onFileSelect && status !== 'active' && (
             <button
               onClick={() => onFileSelect(filePath)}
               className="flex items-center gap-1 text-[10px] text-primary hover:text-primary/80 transition-colors"
             >
-              <ExternalLink className="h-2.5 w-2.5" /> Open in editor
+              <Code2 className="h-2.5 w-2.5" /> Open in editor
             </button>
           )}
         </div>

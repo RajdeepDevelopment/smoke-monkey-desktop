@@ -352,6 +352,52 @@ export interface McpTestResultDto {
   needsOAuth?: boolean;
 }
 
+// ── Share / Hosting contracts ────────────────────────────────────────────────
+
+export interface TunnelStatusDto {
+  running: boolean;
+  url: string | null;
+  startedAt: string | null;
+  hostname: string | null;
+  error: string | null;
+}
+
+export interface ShareConfigDto {
+  id: string;
+  projectName: string;
+  accountId: string | null;
+  tunnelHostname: string | null;
+  tunnelId: string | null;
+  outputDir: string;
+  pagesProjectName: string | null;
+  hasApiToken: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ShareStatusDto {
+  quickTunnel: TunnelStatusDto;
+  persistentTunnel: TunnelStatusDto;
+  cloudflaredAvailable: boolean;
+  cloudflaredVersion: string | null;
+  wranglerAvailable: boolean;
+  wranglerLoggedIn: boolean;
+  config: {
+    projectName: string;
+    accountId: string | null;
+    tunnelHostname: string | null;
+    pagesProjectName: string | null;
+    outputDir: string;
+  };
+}
+
+export interface DeployPagesResultDto {
+  ok: boolean;
+  url?: string;
+  output?: string;
+  error?: string;
+}
+
 // ── Agent contracts ──────────────────────────────────────────────────────────
 
 export type AgentId = 'build' | 'plan' | 'explore' | 'general';
