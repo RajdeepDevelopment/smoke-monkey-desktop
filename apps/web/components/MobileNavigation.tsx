@@ -15,7 +15,6 @@ import {
   Settings,
   User,
   BarChart3,
-  Zap,
   Key,
   Globe,
   BrainCircuit,
@@ -91,7 +90,6 @@ const PRIMARY_SECTIONS = [
 
 const MORE_SECTIONS = [
   { href: '/models', label: 'Models', icon: <Cpu className="h-[18px] w-[18px]" /> },
-  { href: '/playground', label: 'Playground', icon: <Zap className="h-[18px] w-[18px]" /> },
   { href: '/share', label: 'Share', icon: <Share2 className="h-[18px] w-[18px]" /> },
   { href: '/analytics', label: 'Analytics', icon: <BarChart3 className="h-[18px] w-[18px]" /> },
   { href: '/settings', label: 'Settings', icon: <Settings className="h-[18px] w-[18px]" /> },

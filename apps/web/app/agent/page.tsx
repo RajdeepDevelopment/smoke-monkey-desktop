@@ -689,11 +689,11 @@ export default function AgentPage() {
 
         <div className="relative w-full max-w-md animate-fade-up px-5">
           {/* Glowing logo medallion */}
-          <div className="relative mx-auto mb-7 flex h-16 w-16 items-center justify-center">
+          <div className="relative mx-auto mb-7 flex h-24 w-24 items-center justify-center">
             <span className="absolute inset-0 rounded-2xl bg-primary/25 blur-2xl" />
             <span className="absolute inset-0 rounded-2xl border border-primary/30 bg-primary-subtle shadow-glow-strong" />
             <span className="absolute -inset-2.5 rounded-full border border-primary/10 animate-pulse-soft" />
-            <BrandIcon size={40} className="relative drop-shadow-[0_0_16px_rgba(139,92,246,0.55)]" />
+            <BrandIcon size={84} className="relative drop-shadow-[0_0_16px_rgba(139,92,246,0.55)]" />
           </div>
 
           {/* Title block */}

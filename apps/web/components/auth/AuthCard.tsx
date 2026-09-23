@@ -3,11 +3,11 @@
 import Link from 'next/link';
 import { useCallback, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import { ArrowRight, Eye, EyeOff, Loader2, Lock, Mail, Sparkles, TriangleAlert, User } from 'lucide-react';
+import { ArrowRight, Eye, EyeOff, Loader2, Lock, Mail, TriangleAlert, User } from 'lucide-react';
 import { BrandIcon } from '../BrandIcon';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
-import { Card, CardContent, CardFooter, CardHeader, CardTitle, CardDescription } from '../ui/card';
+import { Card, CardContent, CardFooter, CardHeader, CardDescription } from '../ui/card';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 
@@ -47,7 +47,7 @@ export function AuthCard({
   const [fieldErrors, setFieldErrors] = useState<{ name?: string; email?: string; password?: string }>({});
 
   const passwordHint = useMemo(
-    () => (showName ? 'Min 8 characters — mix letters & numbers' : 'Enter your password to unlock'),
+    () => (showName ? 'Min 8 characters — mix letters & numbers' : 'Enter your email and password to continue.'),
     [showName],
   );
 
@@ -91,10 +91,10 @@ export function AuthCard({
   return (
     <div className="w-full max-w-md animate-fade-up">
       {/* Glowing logo medallion */}
-      <div className="relative mx-auto mb-7 flex h-20 w-20 items-center justify-center">
+      <div className="relative mx-auto mb-7 flex h-24 w-24 items-center justify-center">
         <span className="absolute inset-0 rounded-3xl bg-primary/25 blur-2xl" />
         <span className="absolute inset-0 rounded-3xl border border-primary/30 bg-primary-subtle shadow-glow-strong" />
-        <BrandIcon size={46} className="relative drop-shadow-[0_0_18px_rgba(139,92,246,0.55)]" />
+        <BrandIcon size={84} className="relative drop-shadow-[0_0_18px_rgba(139,92,246,0.55)]" />
         <span className="absolute -inset-3 rounded-full border border-primary/10 animate-pulse-soft" />
       </div>
 
@@ -112,13 +112,9 @@ export function AuthCard({
         <span className="pointer-events-none absolute inset-y-0 left-0 w-px bg-gradient-to-b from-transparent via-primary/30 to-transparent" />
         <span className="pointer-events-none absolute inset-y-0 right-0 w-px bg-gradient-to-b from-transparent via-accent/25 to-transparent" />
 
-        <CardHeader className="space-y-1 px-6 pt-6 pb-0">
-          <CardTitle className="inline-flex items-center gap-2 text-ink-primary">
-            <Sparkles className="h-4 w-4 text-primary-hover" />
-            {showName ? 'New workspace' : 'Welcome back'}
-          </CardTitle>
-          <CardDescription>{passwordHint}</CardDescription>
-        </CardHeader>
+        <CardHeader className="space-y-1 px-6 pt-6 pb-0 text-center">
+            <CardDescription>{passwordHint}</CardDescription>
+          </CardHeader>
 
         <form onSubmit={handleFormSubmit} noValidate>
           <CardContent className="space-y-4 px-6 py-5">
@@ -265,7 +261,7 @@ export function AuthCard({
         </form>
       </Card>
 
-      <p className="mt-6 text-center text-sm text-ink-muted">
+      <p className="mt-10 pb-2 text-center text-sm text-ink-muted">
         {footer.label}{' '}
         <Link
           href={footer.href}
@@ -274,6 +270,17 @@ export function AuthCard({
           {footer.action}
         </Link>
       </p>
+
+      <div className="mt-5 flex flex-wrap items-center justify-center gap-2 border-t border-white/[0.06] pt-5">
+        {['Smoke Monkey Agent', 'RAG + Super Memory', '8 providers · 29 tools'].map((chip) => (
+          <span
+            key={chip}
+            className="rounded-full border border-white/[0.06] bg-surface-900/70 px-2.5 py-1 text-[11px] text-ink-muted"
+          >
+            {chip}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

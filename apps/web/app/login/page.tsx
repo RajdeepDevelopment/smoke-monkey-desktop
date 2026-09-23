@@ -38,8 +38,8 @@ export default function LoginPage() {
       </div>
 
       <AuthCard
-        title="Welcome back"
-        subtitle="Sign in to chat with your documents and AI memory."
+        title="Sign in to Smoke Monkey"
+        subtitle="Your agentic AI harness to build, fix, answer, and create anything in your project."
         submitLabel="Sign in"
         submittingLabel="Signing in…"
         busy={busy}

@@ -7,7 +7,6 @@ import {
   Plug,
   BookOpen,
   Cpu,
-  Zap,
   BarChart3,
   Settings,
   LogOut,
@@ -23,7 +22,6 @@ export const RAIL_SECTIONS: { href: string; label: string; icon: typeof Plug }[]
   { href: '/mcp', label: 'MCP', icon: Plug },
   { href: '/documents', label: 'Knowledge Base', icon: BookOpen },
   { href: '/models', label: 'Models', icon: Cpu },
-  { href: '/playground', label: 'Playground', icon: Zap },
   { href: '/analytics', label: 'Analytics', icon: BarChart3 },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];

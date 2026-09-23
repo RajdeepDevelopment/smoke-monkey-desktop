@@ -20,7 +20,7 @@ SSH, MCP, permission gates, and checkpoint/resume. See
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=for-the-badge)](CONTRIBUTING.md)
 
 <p align="center">
-  <img src="smokeMonkeyLogo.png" alt="Smoke Monkey Desktop logo" width="220" />
+  <img src="smokeMonkeyLogo.png" alt="Smoke Monkey Desktop logo" width="440" />
 </p>
 
 ---

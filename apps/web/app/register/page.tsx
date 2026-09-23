@@ -40,7 +40,7 @@ export default function RegisterPage() {
 
       <AuthCard
         title="Create your account"
-        subtitle="Start building a personal AI workspace with RAG and Super Memory."
+        subtitle="Create your Smoke Monkey account — project-aware RAG, Super Memory, and 8 model providers in one harness."
         showName
         submitLabel="Sign up"
         submittingLabel="Creating…"

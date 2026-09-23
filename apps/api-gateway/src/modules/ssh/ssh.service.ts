@@ -6,6 +6,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { Client, type ConnectConfig } from 'ssh2';
 import { SshConnection, SshAuthMethod } from './entities/ssh-connection.entity';
+import { isSmokePath } from '../agent/workspace.service';
 import {
   Connector,
   ConnectorDestination,
@@ -315,6 +316,7 @@ export class SshService implements Connector {
           filePart = filePart.substring(arrowIdx + 4);
         }
       }
+      if (isSmokePath(filePart) || isSmokePath(origPath)) continue;
       let status_code: 'M' | 'A' | 'D' | 'U' | 'R' | 'C';
       if (x === '?' && y === '?') status_code = 'U';
       else if (x === 'A' || y === 'A') status_code = 'A';

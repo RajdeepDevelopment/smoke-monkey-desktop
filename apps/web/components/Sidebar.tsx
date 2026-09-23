@@ -15,7 +15,6 @@ import {
   Share2,
   BookOpen,
   Cpu,
-  Zap,
   BarChart3,
   Settings,
   type LucideIcon,
@@ -48,7 +47,6 @@ export const NAV: NavItem[] = [
   { href: '/share', label: 'Share', icon: Share2 },
   { href: '/documents', label: 'Knowledge Base', icon: BookOpen },
   { href: '/models', label: 'Models', icon: Cpu },
-  { href: '/playground', label: 'Playground', icon: Zap },
   { href: '/analytics', label: 'Analytics', icon: BarChart3 },
   { href: '/settings', label: 'Settings', icon: Settings },
 ];

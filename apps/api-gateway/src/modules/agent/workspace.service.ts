@@ -11,8 +11,16 @@ const IGNORE_DIRS = new Set([
   'node_modules', '.git', '.next', 'dist', 'build', '.cache',
   '__pycache__', 'target', 'coverage', '.venv', 'venv',
   '.pytest_cache', '.mypy_cache', '.ruff_cache', '.gradle',
+  '.smoke',
 ]);
 const IGNORE_FILES = new Set(['.DS_Store']);
+
+/** Smoke Monkey's own agent runtime paths (`<workspace>/.smoke/...`) — created
+ *  by the harness for run artifacts/caches. They are never user work: hide from
+ *  the file tree, search, and git-changes surfaces regardless of gitignore. */
+export function isSmokePath(p?: string): boolean {
+  return !!p && (p === '.smoke' || p.startsWith('.smoke/'));
+}
 
 /** File-tree-only ignore set: node_modules is *kept visible* in the explorer so
  *  the tree mirrors git changes, but it stays excluded from search/indexing
@@ -23,7 +31,7 @@ const TREE_IGNORE_DIRS = new Set([...IGNORE_DIRS].filter((d) => d !== 'node_modu
 export const SEARCH_EXCLUDE_DIRS = [
   'node_modules', '.git', 'dist', 'build', '.next', 'target', 'coverage',
   '.cache', '.turbo', 'vendor', '.venv', 'venv', '__pycache__', '.gradle',
-  '.pytest_cache', '.mypy_cache', '.ruff_cache',
+  '.pytest_cache', '.mypy_cache', '.ruff_cache', '.smoke',
 ];
 
 export interface TreeNode {
@@ -266,6 +274,7 @@ export class WorkspaceService {
           filePart = filePart.substring(arrowIdx + 4);
         }
       }
+      if (isSmokePath(filePart) || isSmokePath(origPath)) continue;
       let status_code: GitStatusEntry['status'];
       if (x === '?' && y === '?') status_code = 'U';
       else if (x === 'A' || y === 'A') status_code = 'A';

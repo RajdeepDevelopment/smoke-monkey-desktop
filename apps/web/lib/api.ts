@@ -9,7 +9,6 @@ import type {
   OmniRouteRankedResponseDto,
   OmniRouteStatusDto,
   OnboardingStateDto,
-  RetrieveResponseDto,
   UserKeyDto,
   UserKeysResponseDto,
   UserSettingsDto,
@@ -465,19 +464,6 @@ export const api = {
 
   // OmniRoute provisioning lifecycle (drives the "Initializing OmniRoute…" UI)
   fetchOmniRouteStatus: () => request<OmniRouteStatusDto>('/api/settings/omniroute/status'),
-
-  // playground (retrieval only, no generation)
-  playgroundRetrieve: (payload: {
-    message: string;
-    mode?: string;
-    provider?: string;
-    model?: string;
-    documentIds?: string[];
-  }) =>
-    request<RetrieveResponseDto>('/api/playground/retrieve', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
 
   // analytics (Redis telemetry summary)
   analyticsMetrics: () => request<MetricsSummaryDto>('/api/analytics/metrics'),

@@ -3094,7 +3094,7 @@ const handleMcpContinue = useCallback(
       {messages.length === 0 && !streamingText && !isRunning && (
         <div className={cn('flex flex-col items-center justify-center text-center', simple ? 'flex-1' : 'h-full')}>
           <div className="flex flex-col items-center">
-            <BrandIcon size={simple ? 52 : 48} className="rounded-xl" />
+            <BrandIcon size={simple ? 96 : 64} className="rounded-xl" />
             <h3 className={cn('mt-4 font-semibold leading-tight text-foreground/95', simple ? 'text-xl' : 'text-base')}>
               {simple ? 'What would you like to do?' : 'Smoke Monkey'}
             </h3>

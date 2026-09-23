@@ -19,7 +19,6 @@ export const TITLES: Record<string, string> = {
   '/documents': 'Knowledge Base',
   '/models': 'Models',
   '/mcp': 'MCP Servers',
-  '/playground': 'Playground',
   '/analytics': 'Analytics',
   '/settings': 'Settings',
   '/login': 'Sign in',

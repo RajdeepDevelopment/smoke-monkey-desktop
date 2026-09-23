@@ -1,6 +1,9 @@
 import { Injectable, Logger, ConflictException, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fsp from 'fs/promises';
+import * as path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { AgentMessageService } from './agent-message.service';
 import { AgentRunService } from './agent-run.service';
 import { AgentSessionService } from './agent-session.service';
@@ -206,6 +209,10 @@ export class AgentService {
 
     await this.messageService.create(sessionId, 'user', message);
 
+    // Generated run artifacts live under <workspace>/.smoke/ — make sure the
+    // workspace's own .gitignore covers them so they never pollute user git.
+    void this.ensureSmokeIgnored(workspacePath);
+
     // Unnamed sessions get a title derived from the opening prompt — the
     // running agent names the chat so the sidebar stops showing "New session".
     void this.maybeAutoTitle(sessionId, message);
@@ -235,6 +242,37 @@ export class AgentService {
       this.logger.log(`Auto-titled session ${sessionId} → "${title}"`);
     } catch (err) {
       this.logger.debug(`Auto-title skipped for ${sessionId}: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Ensure the workspace's .gitignore ignores the generated runtime dir, so
+   * run artifacts (<workspace>/.smoke/) never surface in the user's git.
+   */
+  private async ensureSmokeIgnored(workspacePath: string): Promise<void> {
+    try {
+      if (!workspacePath) return;
+      const isRepo =
+        (await fsp.stat(path.join(workspacePath, '.git')).catch((): null => null) !== null) ||
+        (await this.isGitWorkTree(workspacePath));
+      if (!isRepo) return;
+      const giPath = path.join(workspacePath, '.gitignore');
+      const existing = await fsp.readFile(giPath, 'utf-8').catch(() => '');
+      if (existing.split('\n').some((l) => l.trim() === '.smoke/')) return;
+      const trimmed = existing.replace(/\s*$/, '');
+      const block = `${trimmed ? `${trimmed}\n\n` : ''}# Smoke Monkey agent runtime artifacts\n.smoke/\n`;
+      await fsp.writeFile(giPath, block);
+    } catch {
+      /* best effort — never fail or slow the run over gitignore hygiene */
+    }
+  }
+
+  private async isGitWorkTree(p: string): Promise<boolean> {
+    try {
+      await promisify(execFile)('git', ['-C', p, 'rev-parse', '--is-inside-work-tree']);
+      return true;
+    } catch {
+      return false;
     }
   }
 
