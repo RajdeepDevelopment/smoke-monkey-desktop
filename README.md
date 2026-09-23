@@ -2,7 +2,7 @@
 
 # Smoke Monkey Desktop
 
-### Agentic AI harness — chat with super memory and live visual widgets
+### A super-fast AI code editor with an agentic harness
 
 A production-grade agent platform: an autonomous coding agent (29 tools, 8 model
 providers, permission gates, checkpoint/resume) plus conversation memory and
