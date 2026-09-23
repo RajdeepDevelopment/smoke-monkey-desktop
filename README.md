@@ -9,6 +9,12 @@ sessions, routes each question through the smartest retrieval path, and renders
 **live animated diagrams** right inside the chat — all with page-level
 citations.
 
+**Built-in agent API harness** — the runtime behind an autonomous coding agent,
+comparable to OpenAI Codex, Google Antigravity, and Claude Code's cloud harness.
+Drive any model over REST/SSE or WebSocket: file editing, testing, git, Docker,
+SSH, MCP, permission gates, and checkpoint/resume. See
+[Agent API Harness](docs/agent-api-harness.md).
+
 [![GitHub](https://img.shields.io/badge/github-RajdeepDevelopment%2Fsmoke--monkey--desktop-181717?style=for-the-badge&logo=github)](https://github.com/RajdeepDevelopment/smoke-monkey-desktop)
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-4B0082?style=for-the-badge)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=for-the-badge)](CONTRIBUTING.md)
@@ -37,6 +43,7 @@ citations.
 
 | Capability | What it does |
 |---|---|
+| **Agent harness API** | Drive an autonomous coding agent over **REST + SSE / WebSocket**: 29 built-in tools, per-tool permission gates, checkpoint/resume, sub-agents, and 8 model providers (OpenAI, OpenRouter, NVIDIA NIM, Gemini, xAI, OpenCode Zen, OmniRoute free, Ollama). |
 | **Super memory** | Every exchange is embedded into a vector store and durable user facts (preferences, projects) are extracted into a long-term profile. |
 | **Dynamic visual** | The LLM can drop **animated canvas widgets** into the answer stream — flowcharts, sorting demos, algorithm walkthroughs. |
 | **Document RAG** | Upload PDFs; ask natural-language questions; get streamed answers with page-level citations. |
@@ -50,6 +57,7 @@ citations.
 | Layer | Technologies |
 |---|---|
 | Frontend | Next.js, React, Tailwind CSS, Tauri (desktop) |
+| Transports | REST, Server-Sent Events (SSE), WebSocket (`/ws/agent`) |
 | Backend | NestJS (API gateway), FastAPI (RAG service), Python, Node.js |
 | Data & AI | PostgreSQL, pgvector, Redis, Ollama, OpenRouter, NVIDIA NIM |
 | Messaging | NATS JetStream, MinIO (S3) |
@@ -134,12 +142,12 @@ flowchart TD
     A[Tool Call Executed] --> B{Is Same Tool+Args<br/>as Recent Calls?}
     B -- Yes --> C[Increment Tool Count]
     B -- No --> D[Reset Tool Count for This Tool]
-    C --> E{Count >= MAX_SAME_TOOL_CALLS?<br/>default: 7}
+    C --> E{Count >= MAX_SAME_TOOL_CALLS?<br/>default: 1000}
     E -- Yes --> F[DOOM LOOP DETECTED]
     E -- No --> G{Is Search Family Tool?}
     G -- Yes --> H[Increment Search Family Streak]
     G -- No --> I[Reset Search Family Streak]
-    H --> J{Streak >= SEARCH_FAMILY_LOOP_THRESHOLD?<br/>default: 6}
+    H --> J{Streak >= SEARCH_FAMILY_LOOP_THRESHOLD?<br/>default: 1000}
     J -- Yes --> K[SEARCH FAMILY LOOP DETECTED]
     J -- No --> L[Continue Execution]
     I --> L
@@ -222,7 +230,7 @@ DB_DRIVER=sqlite node dist/main.js
 
 Key differences from Docker mode:
 - No Redis, NATS, or MinIO (skipped automatically)
-- SQLite database at `~/.smokemonkey/smoke-monkey.db`
+- SQLite database at `~/.smokemonkey/smokemonkey.db`
 - Ollama runs locally at `http://localhost:11434`
 
 ## Project Structure
