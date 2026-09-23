@@ -191,6 +191,26 @@ flowchart TD
     E --> L
 ```
 
+## Install on macOS
+
+Build the desktop app from source and install it to `/Applications` in one
+command (requires `node`, `pnpm`, and Xcode Command Line Tools):
+
+```bash
+./install.sh
+```
+
+What it does:
+- installs workspace deps (`pnpm install`) and shuts down any running instance
+- rebuilds the api-gateway + web UI, then the Rust release binary
+- assembles `Smoke Monkey.app` and copies it to `/Applications`
+
+Start it with `open "/Applications/Smoke Monkey Desktop.app"`. OmniRoute is not
+bundled — the app self-installs it on first launch and shows
+**"Initializing OmniRoute…"** while doing so. See also
+[`bundle-app.sh`](apps/desktop/scripts/bundle-app.sh) for the hand-rolled
+`.app` assembler.
+
 ## Quick Start
 
 Requires Docker + Docker Compose (~8 GB free disk for local models).

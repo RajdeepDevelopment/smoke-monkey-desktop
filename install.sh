@@ -8,12 +8,12 @@
 # OmniRoute is NOT bundled here — the app self-installs it on first launch
 # (pinned to omniroute@3.8.50) and shows "Initializing OmniRoute…" while doing so.
 #
-# Usage: scripts/install.sh   (run from apps/desktop)
+# Usage: ./install.sh   (run from repo root)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DESKTOP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-PROJECT_ROOT="$(cd "$DESKTOP_DIR/../.." && pwd)"
+PROJECT_ROOT="$SCRIPT_DIR"
+DESKTOP_DIR="$PROJECT_ROOT/apps/desktop"
 
 APP_NAME="Smoke Monkey Desktop.app"
 APP_PATH="/Applications/$APP_NAME"
@@ -56,12 +56,12 @@ touch "$DESKTOP_DIR/src-tauri/build.rs"
 echo "[install] building app (Rust release binary)..."
 cd "$DESKTOP_DIR"
 if ! pnpm exec tauri build --no-bundle; then
-  echo "[install] build failed - run from: apps/desktop" >&2
+  echo "install failed - see build output above" >&2
   exit 1
 fi
 
 echo "[install] assembling .app bundle..."
-bash "$SCRIPT_DIR/bundle-app.sh"
+bash "$DESKTOP_DIR/scripts/bundle-app.sh"
 
 echo "[install] installing to ${APP_PATH}..."
 # Quit the running app first (if any) so the bundle isn't replaced mid-run.
