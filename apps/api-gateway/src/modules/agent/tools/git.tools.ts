@@ -92,6 +92,11 @@ export function getGitStatusTool(): ToolDefinition {
           const workStatus = line[1];
           const file = line.substring(3);
 
+          // Hide Smoke Monkey's own runtime artifacts (<workspace>/.smoke/...) so
+          // the agent never treats generated runs/cache as the user's work.
+          const smoke = (p?: string) => !!p && (p === '.smoke' || p.startsWith('.smoke/'));
+          if (file.split(' -> ').some(smoke)) continue;
+
           if ('AMDR'.includes(indexStatus)) {
             if (indexStatus === 'R' || indexStatus === 'D') summary.renamed.push(`  ${line[0]}${line[1]} ${file}`);
             else summary.staged.push(`  ${line[0]}${line[1]} ${file}`);

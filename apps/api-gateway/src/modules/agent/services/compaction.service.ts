@@ -104,6 +104,8 @@ export class ContextCompactionService {
           decisions: prev.decisions || [],
           errors: prev.errors || [],
           plan: prev.plan || [],
+          activeSubContexts: prev.activeSubContexts || [],
+          activeContexts: prev.activeContexts || [],
         };
         await this.sessionService.saveContextSnapshot(sessionId, merged as unknown as Record<string, unknown>);
       }

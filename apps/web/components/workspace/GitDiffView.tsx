@@ -98,9 +98,9 @@ export function GitDiffView({
               minimap: { enabled: false },
               scrollBeyondLastLine: false,
               automaticLayout: true,
-              padding: { top: 8, bottom: 8 },
+              padding: { top: 0, bottom: 0 },
               renderOverviewRuler: false,
-              hideUnchangedRegions: { enabled: true, contextLineCount: 3 },
+              hideUnchangedRegions: { enabled: false },
               scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10, useShadows: false },
             }}
           />

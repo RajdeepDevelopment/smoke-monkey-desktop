@@ -15,8 +15,9 @@ import {
   CheckCircle2,
   FileSearch,
 } from 'lucide-react';
-import type { ConversationDto, DocumentDto } from '@rag/contracts';
+import type { DocumentDto } from '@rag/contracts';
 import { api } from '../../lib/api';
+import { agentApi, type AgentSession } from '../../lib/agent-api';
 import { useAuth } from '../../components/AuthProvider';
 import { MetricCard } from '../../components/MetricCard';
 import { EmptyState } from '../../components/EmptyState';
@@ -85,16 +86,16 @@ function MiniBarChart({ docs }: { docs: DocumentDto[] }) {
 
 export default function DashboardPage() {
   const { user } = useAuth();
-  const [conversations, setConversations] = useState<ConversationDto[] | null>(null);
+  const [sessions, setSessions] = useState<AgentSession[] | null>(null);
   const [documents, setDocuments] = useState<DocumentDto[] | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
 
   useEffect(() => {
     if (!user) return;
-    api
-      .listConversations()
-      .then(setConversations)
-      .catch(() => setConversations([]));
+    agentApi
+      .listSessions()
+      .then(setSessions)
+      .catch(() => setSessions([]));
     api
       .listDocuments()
       .then(setDocuments)
@@ -106,8 +107,8 @@ export default function DashboardPage() {
   }, [user]);
 
   const docs = documents ?? [];
-  const convos = conversations ?? [];
-  const loading = conversations === null && documents === null;
+  const convos = sessions ?? [];
+  const loading = sessions === null && documents === null;
 
   const readyDocs = docs.filter((d) => d.status === 'ready').length;
   const totalChunks = docs.reduce((sum, d) => sum + (d.chunkCount || 0), 0);
@@ -226,8 +227,8 @@ export default function DashboardPage() {
                 <MessageSquare className="h-4 w-4 text-ink-muted" />
                 <h3 className="text-sm font-semibold text-white">Recent conversations</h3>
               </div>
-              <Link href="/chat" className="inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline">
-                Open chat <ArrowRight className="h-3 w-3" />
+              <Link href="/agent" className="inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline">
+                Open agent <ArrowRight className="h-3 w-3" />
               </Link>
             </div>
 
@@ -245,9 +246,9 @@ export default function DashboardPage() {
                 compact
                 icon={<MessageSquare className="h-6 w-6" />}
                 title="Start your first conversation"
-                description="Ask anything about your documents and Smoke Monkey will answer with sources."
+                description="Pick a model, choose a folder, and Smoke Monkey will build with you."
                 action={
-                  <Link href="/chat" className="btn-primary">
+                  <Link href="/agent" className="btn-primary">
                     <Plus className="h-4 w-4" /> New chat
                   </Link>
                 }
@@ -262,7 +263,7 @@ export default function DashboardPage() {
                     transition={{ duration: 0.25, delay: i * 0.04 }}
                   >
                     <Link
-                      href={`/chat?c=${c.id}`}
+                      href={`/agent?s=${c.id}`}
                       className="group flex items-center justify-between gap-3 rounded-lg px-2 py-2.5 transition-colors hover:bg-surface-800/60"
                     >
                       <div className="flex min-w-0 items-center gap-2.5">

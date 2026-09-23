@@ -2,6 +2,8 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { EventEmitterModule, EventEmitter2 } from '@nestjs/event-emitter';
 import { AgentController } from './agent.controller';
+import { GitAgentController } from './git-agent.controller';
+import { GitAgentService } from './services/git-agent.service';
 import { WorkspaceController } from './workspace.controller';
 import { WorkspaceService } from './workspace.service';
 import { AgentGateway } from './agent.gateway';
@@ -25,7 +27,7 @@ import { getReadFileTool, getWriteFileTool, getEditFileTool, getLineEditTool, ge
 import { getRunCommandTool, getRunTestTool, getDockerExecTool, getDockerListTool } from './tools/terminal.tools';
 import { getGlobTool, getGrepTool, getFindSymbolTool, getSearchCodeTool } from './tools/search.tools';
 import { getGitStatusTool, getGitDiffTool, getGitLogTool } from './tools/git.tools';
-import { getTodoWriteTool, getAskUserTool, getContextManageTool, getFinishTaskTool } from './tools/agent.tools';
+import { getAskUserTool, getContextManageTool, getFinishTaskTool, getTodoWriteTool } from './tools/agent.tools';
 import { getSshRunTool } from './tools/ssh.tools';
 import { AuthModule } from '../auth/auth.module';
 import { ApiKeysModule } from '../keys/api-keys.module';
@@ -34,13 +36,16 @@ import { ConnectorRegistry } from '../ssh/connector.registry';
 import { SecretsModule } from '../secrets/secrets.module';
 import { SecretsService } from '../secrets/secrets.service';
 import { McpModule } from '../mcp/mcp.module';
+import { ModelsModule } from '../models/models.module';
 import { McpService } from '../mcp/mcp.service';
 import { getSecretManagerTool } from './tools/secret.tools';
+import { getAddMcpServerTool } from './tools/mcp-manage.tools';
+import { getMcpStockTool, getRequestMcpApprovalTool } from './tools/mcp-stock.tools';
 
 const toolRegistryProvider = {
   provide: ToolRegistry,
-  inject: [ConnectorRegistry, SecretsService],
-  useFactory: (connectors: ConnectorRegistry, secrets: SecretsService) => {
+  inject: [ConnectorRegistry, SecretsService, McpService],
+  useFactory: (connectors: ConnectorRegistry, secrets: SecretsService, mcpService: McpService) => {
     const registry = new ToolRegistry();
     registry.register(getReadFileTool());
     registry.register(getWriteFileTool());
@@ -62,12 +67,15 @@ const toolRegistryProvider = {
     registry.register(getGitStatusTool());
     registry.register(getGitDiffTool());
     registry.register(getGitLogTool());
-    registry.register(getTodoWriteTool());
     registry.register(getAskUserTool());
     registry.register(getContextManageTool());
     registry.register(getFinishTaskTool());
+    registry.register(getTodoWriteTool());
     registry.register(getSshRunTool(connectors));
     registry.register(getSecretManagerTool(secrets));
+    registry.register(getAddMcpServerTool(mcpService));
+    registry.register(getMcpStockTool(mcpService));
+    registry.register(getRequestMcpApprovalTool(mcpService));
     return registry;
   },
 };
@@ -86,6 +94,7 @@ const eventEmitterProvider = {
     SshModule,
     SecretsModule,
     McpModule,
+    ModelsModule,
     TypeOrmModule.forFeature([
       AgentSession,
       AgentRun,
@@ -94,12 +103,13 @@ const eventEmitterProvider = {
       AgentPermission,
     ]),
   ],
-  controllers: [AgentController, WorkspaceController],
+  controllers: [AgentController, WorkspaceController, GitAgentController],
   providers: [
     toolRegistryProvider,
     eventEmitterProvider,
     AgentGateway,
     WorkspaceService,
+    GitAgentService,
     AgentService,
     AgentSessionService,
     AgentRunService,

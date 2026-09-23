@@ -38,6 +38,10 @@ interface Props {
   className?: string;
   /** Optional mode-aware client for Remote-SSH. Defaults to local. */
   client?: WorkspaceClient;
+  /** External create trigger (explorer toolbar): bump `nonce` to open a root-level inline create row. */
+  createSignal?: { nonce: number; type: 'file' | 'directory' } | null;
+  /** External collapse trigger (explorer toolbar): bump `nonce` to collapse every directory. */
+  collapseSignal?: { nonce: number } | null;
 }
 
 function sortEntries(list: TreeNode[]): TreeNode[] {
@@ -73,6 +77,8 @@ export const FileExplorer = memo(function FileExplorer({
   loading,
   className,
   client: clientProp,
+  createSignal,
+  collapseSignal,
 }: Props) {
   const client = clientProp ?? createWorkspaceClient('local');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -87,6 +93,17 @@ export const FileExplorer = memo(function FileExplorer({
     | null
   >(null);
   const { openMenu, contextMenu } = useContextMenu();
+
+  // Explorer toolbar actions (VS Code-style header buttons).
+  useEffect(() => {
+    if (!createSignal) return;
+    setInputState({ mode: 'create', parentDir: workspaceRoot, type: createSignal.type });
+  }, [createSignal, workspaceRoot]);
+
+  useEffect(() => {
+    if (!collapseSignal) return;
+    setExpanded(new Set());
+  }, [collapseSignal]);
 
   // Auto-expand the first two levels on initial load
   const initialExpanded = useRef(false);
@@ -399,7 +416,7 @@ export const FileExplorer = memo(function FileExplorer({
             const gitMeta = gitEntries?.get(relOf(entry.path));
 
             return (
-              <div key={entry.path}>
+              <div key={entry.path} className="group/row relative">
                 <button
                   onClick={() => {
                     setFocusedIndex(i);
@@ -412,7 +429,7 @@ export const FileExplorer = memo(function FileExplorer({
                   }
                   title={entry.path}
                   className={cn(
-                    'group flex h-[22px] w-full items-center gap-1 pr-2 text-left text-xs transition-colors',
+                    'group flex h-[22px] w-full items-center gap-1 pr-7 text-left text-xs transition-colors',
                     focused && !isSelected && 'bg-white/[0.04]',
                     isActive
                       ? 'bg-primary-subtle text-foreground'
@@ -460,6 +477,35 @@ export const FileExplorer = memo(function FileExplorer({
                     <RefreshCw className="h-2.5 w-2.5 animate-spin text-ink-muted" />
                   )}
                 </button>
+
+                {/* VS Code-style hover quick actions: rename / delete */}
+                <div className="absolute right-1 top-[1.5px] z-10 flex h-[19px] shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/row:opacity-100">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setInputState({ mode: 'rename', target: entry });
+                    }}
+                    className="flex h-4 w-4 items-center justify-center rounded-sm text-ink-muted hover:bg-white/10 hover:text-foreground"
+                    title="Rename…"
+                    aria-label={`Rename ${entry.name}`}
+                  >
+                    <Pencil className="h-2.5 w-2.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void deleteEntry(entry);
+                    }}
+                    className="flex h-4 w-4 items-center justify-center rounded-sm text-ink-muted hover:bg-red-500/20 hover:text-red-300"
+                    title="Delete"
+                    aria-label={`Delete ${entry.name}`}
+                  >
+                    <Trash2 className="h-2.5 w-2.5" />
+                  </button>
+                </div>
+
                 {inputState &&
                   ((inputState.mode === 'rename' && inputState.target.path === entry.path) ||
                     (inputState.mode === 'create' &&

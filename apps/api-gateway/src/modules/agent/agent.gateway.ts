@@ -290,6 +290,7 @@ export class AgentGateway implements OnGatewayInit, OnGatewayConnection, OnGatew
       'todo.updated',
       'phase.changed',
       'agent.state',
+      'mcp.stock',
     ];
 
     const subs: Subscription[] = [];

@@ -1,0 +1,175 @@
+MCP INVESTIGATION — "boring MCP recommendations on a git repo / push task"
+===========================================================================
+Date: 2026-09-13 · Author: Smoke Monkey session · Review target: opencode (later)
+
+SYMPTOM
+-------
+User asked the agent to "create the project and create a git repo and push it".
+Instead of running local git, the run entered a *looping MCP approval context*:
+the agent (MCP-FIRST system prompt) kept calling inspect_mcp_stock, which
+"recommended" clearly irrelevant servers for a purely-local git task (drawio,
+excalidraw, lucid, mermaid, railway, browserbase, sqlite, whatsapp,
+digitalocean, fetch, memory, …). Because recommendations were non-empty, the
+agent-loop paused the whole run waiting for an MCP enable/add decision — over
+and over.
+
+ROOT CAUSE (4 contributing factors)
+-----------------------------------
+1. SYSTEM PROMPT MANATES STOCK INSPECTION FOR EVERY TASK
+   apps/api-gateway/src/modules/agent/lib/system-prompt.ts
+   - MCP-FIRST WORK PROTOCOL (lines ~115-126): "run inspect_mcp_stock at the
+     START of every code task AND at EVERY phase boundary".
+   - Step 2b (lines ~144-147+): "MANDATORY: call inspect_mcp_stock ONCE at the
+     start of every code task — even if the task looks purely local."
+
+2. RECOMMENDATION SCORING IS TOO LOOSE
+   apps/api-gateway/src/modules/agent/tools/mcp-stock.tools.ts (task block)
+   - Tokens from the task text are matched against EVERY catalog entry's name,
+     label, description, category, command, args, dependency.
+   - Old filter: `x.s > 0` → a SINGLE generic token (e.g. "create", "git",
+     "push") matching any stock description was enough to "recommend" it.
+     drawio/excalidraw/mermaid all contain "create diagrams"; railway/vercel
+     contain "deploy/full-stack apps"; whatsapp/slack contain "messages/push".
+     For "create a git repo and push" -> token overlap "create"/"push" fired
+     on dozens of unrelated servers.
+   - No local-task awareness: nothing told the tool that a purely-local task
+     (git init/push, local file edits, local tests) needs NO external capability.
+
+3. APPROVAL PAUSE FIRES WHENEVER RECOMMENDATIONS EXIST
+   apps/api-gateway/src/modules/agent/services/agent-loop.ts (~lines 860-900)
+   - After inspect_mcp_stock, if `recommendedToEnable` or `recommendedToAdd`
+     is non-empty -> run status set to `waiting_mcp_approval` and the loop
+     BLOCKS until the user enables/adds/skips via the resolve endpoint.
+     Nonsense recommendations therefore translated directly into a blocking
+     approval popup — and re-fired on the next phase boundary (the "loop").
+
+4. ZERO-CONFIGURED MCP PROJECTS RENDER NO "26. MCP SERVERS" BLOCK
+   system-prompt.ts (Section 26 condition)
+   - Old: `${opts?.mcp?.configured && opts.mcp.servers.length > 0 ? ... : ''}`
+   - On a fresh project with no MCP servers configured, Section 26 was EMPTY,
+     so there was no explicit "none configured" guidance in the system context;
+     only the stock catalog section (#25) which pushes the agent toward MCP.
+
+FIX APPLIED
+-----------
+1. LOCAL-ONLY TASK GUARD (mcp-stock.tools.ts)
+   - Added LOCAL_TASK_RE (git/repo/commit/push/pull/branch/merge/init/scaffold/
+     clone/stash, …) and EXTERNAL_TASK_RE (deploy/browser/db/cloud/messaging/
+     github/oauth/website/…). If a task matches LOCAL but NOT EXTERNAL, the tool
+     treats it as LOCAL-ONLY: recommendations are suppressed entirely and the
+     text result says "LOCAL-ONLY TASK — no external capability needed, ... do
+     NOT offer to enable/add MCP servers".
+2. INVENTORY IS NOW SORTED + AGENT-DRIVEN POPUP
+   - `inspect_mcp_stock` returns a SORTED inventory (server name, description,
+     id — alphabetical) plus scored candidate hints. It is READ-ONLY: it NEVER
+     pauses the run on its own.
+   - New tool `request_mcp_approval(serverIds, reason)` — the AGENT decides which
+     servers are actually required and triggers the popup explicitly. The
+     agent-loop pauses (waiting_mcp_approval) ONLY when this tool is called, and
+     blocks until the user picks **Skip** or **Continue** via the resolve endpoint.
+     The user's decision is returned to the agent as the tool result (via the
+     buildMcpDecisionNote system note).
+3. NO AUTO-PAUSE FROM INVENTORY
+   - agent-loop.ts: removed the old `toolName === 'inspect_mcp_stock'` auto-pause
+     that fired on ANY non-empty recommendation; replaced with
+     `toolName === 'request_mcp_approval'` (agent-driven). Every explicit
+     request_mcp_approval call with real enable/add candidates PAUSES the run
+     (waiting_mcp_approval) and blocks until the user picks **Skip** or
+     **Continue** — mirroring ask_user. The old `ctx.mcpDecisionResolved`
+     one-shot guard was removed so the model can legitimately ask about a second
+     domain later in the run.
+4. STRUCTURED LOGGING (mcp-stock.tools.ts + agent-loop.ts)
+   - [mcp-stock] logs: task text (truncated), token set, localOnly verdict,
+     scored matches (server=score) or "no meaningful match", and the
+     local-task suppression reason. Logger name: McpStockTool.
+   - [mcp-approval] logs on both paths: when request_mcp_approval is called with
+     the requested ids/reason, when the run actually pauses (with task + counts),
+     and when it does NOT pause (nothing to enable/add).
+5. SYSTEM-PROMPT GUIDANCE (system-prompt.ts)
+   - MCP-FIRST protocol intro: inspect is READ-ONLY, you decide what's required,
+     and you ask the user ONLY via request_mcp_approval (which pauses).
+   - Step 2b + Step 2e + Section 25 + Section 26 now state that a "LOCAL-ONLY
+     TASK" verdict is CORRECT and the agent must not nag/offer MCPs for local
+     work; that the approval POPUP opens ONLY from an explicit
+     request_mcp_approval call; and that the run PAUSES until the user picks
+     Skip or Continue, then react to the decision (enable/add → activate;
+     skip → proceed with local tools).
+   - Section 26 renders a "none configured" guidance block when zero servers
+     are configured.
+
+HOW TO VERIFY (when you run the desktop app / agent)
+----------------------------------------------------
+1. Start api-gateway, watch stdout:
+   - Run: "create a git repo and commit/push it" (no github mention).
+   - Expect: log line `[mcp-stock] inspect task="..." tokens=[...] localOnly=true`
+     followed by `[mcp-stock] local-only task — recommendations suppressed`.
+   - Expect: NO `[mcp-approval] Pausing` line, NO popup.
+2. Grep for either of:
+       grep "mcp-stock"  -> tool-level decision logs
+       grep "mcp-approval" -> pause/decision logs
+3. Popup now ONLY appears when the AGENT calls request_mcp_approval:
+   - A task that genuinely needs a disabled/not-added server → the model calls
+     request_mcp_approval → run status waiting_mcp_approval + popup with
+     Skip/Continue; the loop BLOCKS until the user responds.
+4. Sanity: a genuinely external task (e.g. "deploy to vercel", "query a
+   postgres database", "send a whatsapp message", "create a github repo")
+   should still let the model recommend the right server and trigger the popup
+   via request_mcp_approval.
+
+FILES TOUCHED
+-------------
+- apps/api-gateway/src/modules/agent/tools/mcp-stock.tools.ts
+  (Logger import + module `stockLogger`; LOCAL_TASK_RE/EXTERNAL_TASK_RE;
+   localOnly guard; s>=2 threshold; decision logging; LOCAL-ONLY text branch;
+   `serverToRow` extracted; inventory sorted by name; NEW getRequestMcpApprovalTool)
+- apps/api-gateway/src/modules/agent/services/agent-loop.ts
+  (MCP approval pause now agent-driven: ONLY request_mcp_approval pauses;
+   richer [mcp-approval] log: task + toEnable/toAdd ids)
+- apps/api-gateway/src/modules/agent/lib/system-prompt.ts
+  (MCP-FIRST intro; 2b/2e carve-outs; Section 25 agent-driven RULES; Section 26
+   zero-configured block + request_mcp_approval wording)
+- apps/api-gateway/src/modules/agent/agent.module.ts (register new tool)
+- apps/api-gateway/src/modules/agent/services/run-context.ts
+  (TOOL_GROUPS.core += request_mcp_approval)
+
+FIXES APPLIED (2026-09-14, follow-up — sub-context activation gap)
+----------------------------------------------------------------
+- Finding: in a real run (session 45e98dea / run 5754a3f5, "restaurant detail
+  page, seed data, browser verify") the agent called inspect_mcp_stock at the
+  start of the continued run, got "no enabled server obviously matches; nothing
+  qualifies >=70%", then proceeded straight to INSPECT WITHOUT calling
+  context_manage once — activeSubContexts stayed [] the whole run.
+- This is CORRECT for MCP paths (nothing qualified → no request_mcp_approval →
+  no popup/pause), which is exactly the intended fix for the noise. But NO
+  sub-context was opened either (AUTO_CONTEXT_ACTIVATION=false default AND the
+  agent skipped context_manage).
+- system-prompt.ts step 2d rewritten as MANDATORY: after inspect, the agent MUST
+  context_manage(activate) the matching sub-contexts (efficient_editing,
+  verification_rigor, frontend_ui, backend_scale) EVEN IF no MCP qualifies —
+  step 2e gate (c) already blocks proceeding when a matching sub-context is
+  missing.
+- sub-context.ts renderContextPanel header rewritten as "MANDATORY
+  RECONCILIATION THIS TURN": the ALREADY-OPEN set injected every turn (via
+  agent.service.ts buildSystemPromptContent -> renderContextPanel) is the
+  session's persisted starting point; the agent reads ACTIVE first, opens
+  missing matching sub-contexts/MCPs before other tool calls, adds the best
+  match when nothing relevant is open, and deactivates what the step no longer
+  uses.
+- Persistence already round-trips: persistContext() saves activeSubContexts
+  (incl. mcp_<id>); resume splits static vs MCP ids and re-opens persisted MCPs
+  after runtime registration (agent.service.ts ~396-449). Empty persisted set
+  in the observed run was CAUSED by the agent never calling context_manage —
+  not a persistence bug.
+- MCP tools are runtime-gated: tool-library.ts resolveToolDefinitions only
+  exposes an MCP server's tools when its mcp_<id> sub-context is ACTIVE
+  (contextManager.isActive), so "no MCP started" also means its tools were not
+  on the menu that run.
+
+NEXT INVESTIGATION STEPS (for opencode later)
+---------------------------------------------
+- Confirm the noise is gone on the user's exact scenario in the packaged app.
+- Consider whether inspect_mcp_stock should be SKIPPED entirely (not just
+  return empty) for local-only tasks to save a tool round-trip + tokens.
+- The FE already only opens the add/enable dialogs on `mcp.approval_required`
+  (which now fires only from request_mcp_approval) — verify the popup's
+  Skip/Continue both resolve cleanly in the packaged .app.

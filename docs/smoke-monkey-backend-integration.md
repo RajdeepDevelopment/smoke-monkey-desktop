@@ -10,9 +10,9 @@ Smoke Monkey Agent Extension (extensions/smoke-monkey-agent/)
 Smoke Monkey API Gateway (apps/api-gateway/ :3000)
     |
 +------------------+
-| AgentService     | Main orchestrator (30-step loop)
-| LLM Integration  | NVIDIA/OpenAI/OpenRouter/Ollama
-| ToolRegistry     | 19 tools
+| AgentService     | Main orchestrator (up to 1000 guarded steps, default maxSteps=100)
+| LLM Integration  | NVIDIA/OpenAI/OpenRouter/Ollama/Gemini/xAI/OpenCode Zen/OmniRoute
+| ToolRegistry     | 29 tools
 | PermissionService| allow/deny/ask
 | SessionService   | UUID sessions
 | Event Emitter    | EventEmitter2
@@ -79,7 +79,7 @@ Event types:
 - todo.updated {todos} - task list update
 - ping {} - keepalive
 
-## Available Tools (19 total)
+## Available Tools (29 total)
 
 ### Filesystem
 - read_file, write_file, edit_file, apply_patch, delete_file, list_directory

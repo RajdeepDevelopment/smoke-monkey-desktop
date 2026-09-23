@@ -13,6 +13,14 @@ export interface AgentSession {
   totalCost: number;
   createdAt: string;
   updatedAt: string;
+  /** Compacted-context snapshot persisted with the session. Contains
+   *  activeSubContexts / activeContexts so the UI can restore the live
+   *  context bar across refresh (ids + titles the FE has no catalog for). */
+  contextSnapshot?: {
+    activeSubContexts?: string[];
+    activeContexts?: Array<{ id: string; title: string }>;
+    [key: string]: unknown;
+  } | null;
 }
 
 export interface AgentMessage {
@@ -272,6 +280,12 @@ export const agentApi = {
     agentRequest<{ status: string }>(`/api/agent/ask-user/${toolCallId}/resolve`, {
       method: 'POST',
       body: JSON.stringify({ response }),
+    }),
+
+  resolveMcpDecision: (sessionId: string, toolCallId: string, action: 'enable' | 'add' | 'skip', names: string[]) =>
+    agentRequest<{ status: string }>(`/api/agent/sessions/${sessionId}/mcp-resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ toolCallId, action, names }),
     }),
 
   execTerminal: (command: string, cwd?: string) =>

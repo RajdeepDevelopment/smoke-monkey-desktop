@@ -22,6 +22,8 @@ export interface GitStatusResult {
   branch?: string;
   ahead?: number;
   behind?: number;
+  /** Total number of change entries (entries may be just a page). */
+  total?: number;
   entries: GitStatusEntry[];
 }
 
@@ -31,7 +33,7 @@ export function normalizeGitStatus(raw: unknown): GitStatusResult {
   if (!raw || typeof raw !== 'object') return { isRepo: false, entries: [] };
   const r = raw as Record<string, any>;
   if (Array.isArray(r.entries)) {
-    return { isRepo: r.isRepo !== false, branch: r.branch, ahead: r.ahead, behind: r.behind, entries: r.entries };
+    return { isRepo: r.isRepo !== false, branch: r.branch, ahead: r.ahead, behind: r.behind, total: r.total, entries: r.entries };
   }
   // Legacy gateway shape
   const changes = Array.isArray(r.changes) ? r.changes : [];
@@ -43,6 +45,7 @@ export function normalizeGitStatus(raw: unknown): GitStatusResult {
     branch: r.branch,
     ahead: r.ahead,
     behind: r.behind,
+    total: r.total ?? r.totalCount,
     entries: changes.map(mapLegacy).filter((e): e is GitStatusEntry => e !== null),
   };
 }
@@ -132,24 +135,100 @@ export const ideApi = {
     }),
 
   // ── Git ─────────────────────────────────────────────────────────────────
-  gitStatus: async (root: string) =>
-    normalizeGitStatus(await request<unknown>(`/api/agent/git/status?path=${encodeURIComponent(root)}`)),
+  gitStatus: async (root: string, opts?: { limit?: number; offset?: number }) => {
+    const params = new URLSearchParams({ path: root });
+    if (opts?.limit != null) params.set('limit', String(opts.limit));
+    if (opts?.offset != null) params.set('offset', String(opts.offset));
+    return normalizeGitStatus(await request<unknown>(`/api/agent/git/status?${params.toString()}`));
+  },
 
   gitDiffFile: (root: string, file: string) =>
     request<{ original: string; current: string; isBinary: boolean }>(
       `/api/agent/git/diff-file?path=${encodeURIComponent(root)}&file=${encodeURIComponent(file)}`,
     ),
 
-  gitStage: (cwd: string, files: string[], unstage = false) =>
+  gitStage: (cwd: string, files: string[], unstage = false, all = false) =>
     request<{ status: string }>('/api/agent/git/stage', {
       method: 'POST',
-      body: JSON.stringify({ cwd, files, unstage }),
+      body: JSON.stringify({ cwd, files, unstage, all }),
     }),
 
   gitDiscard: (cwd: string, file: string, untracked = false) =>
     request<{ status: string }>('/api/agent/git/discard', {
       method: 'POST',
       body: JSON.stringify({ cwd, file, untracked }),
+    }),
+
+  gitInit: (cwd: string) =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/agent/git/init', {
+      method: 'POST',
+      body: JSON.stringify({ cwd }),
+    }),
+
+  gitCommit: (cwd: string, message: string, stageAll = false) =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/agent/git/commit', {
+      method: 'POST',
+      body: JSON.stringify({ cwd, message, stageAll }),
+    }),
+
+  gitFetch: (cwd: string) =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/agent/git/fetch', {
+      method: 'POST',
+      body: JSON.stringify({ cwd }),
+    }),
+
+  gitPull: (cwd: string) =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/agent/git/pull', {
+      method: 'POST',
+      body: JSON.stringify({ cwd }),
+    }),
+
+  gitPush: (cwd: string, setUpstream = false) =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/agent/git/push', {
+      method: 'POST',
+      body: JSON.stringify({ cwd, setUpstream }),
+    }),
+
+  gitStashes: (cwd: string) =>
+    request<{ stashes: string[] }>(`/api/agent/git/stashes?path=${encodeURIComponent(cwd)}`),
+
+  gitStashPush: (cwd: string, message?: string) =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/agent/git/stash/push', {
+      method: 'POST',
+      body: JSON.stringify({ cwd, ...(message ? { message } : {}) }),
+    }),
+
+  gitStashApply: (cwd: string, name?: string) =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/agent/git/stash/apply', {
+      method: 'POST',
+      body: JSON.stringify({ cwd, ...(name ? { name } : {}) }),
+    }),
+
+  gitStashPop: (cwd: string, name?: string) =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/agent/git/stash/pop', {
+      method: 'POST',
+      body: JSON.stringify({ cwd, ...(name ? { name } : {}) }),
+    }),
+
+  gitStashDrop: (cwd: string, name: string) =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/agent/git/stash/drop', {
+      method: 'POST',
+      body: JSON.stringify({ cwd, name }),
+    }),
+
+  gitBranches: (cwd: string) =>
+    request<{ branches: string[] }>(`/api/agent/git/branches?path=${encodeURIComponent(cwd)}`),
+
+  gitCreateBranch: (cwd: string, name: string) =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/agent/git/branch/create', {
+      method: 'POST',
+      body: JSON.stringify({ cwd, name }),
+    }),
+
+  gitSwitchBranch: (cwd: string, name: string) =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/agent/git/branch/switch', {
+      method: 'POST',
+      body: JSON.stringify({ cwd, name }),
     }),
 
   // ── Search ──────────────────────────────────────────────────────────────

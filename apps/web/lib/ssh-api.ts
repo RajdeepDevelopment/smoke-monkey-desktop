@@ -204,12 +204,17 @@ export const sshApi = {
       method: 'DELETE',
     }),
 
-  gitStatus: (id: string, remotePath = '~') =>
-    request<{
+  gitStatus: (id: string, remotePath = '~', opts?: { limit?: number; offset?: number }) => {
+    const params = new URLSearchParams({ id, path: remotePath });
+    if (opts?.limit != null) params.set('limit', String(opts.limit));
+    if (opts?.offset != null) params.set('offset', String(opts.offset));
+    return request<{
       isRepo: boolean;
       branch?: string;
       ahead?: number;
       behind?: number;
+      total?: number;
       entries: { path: string; origPath?: string; x: string; y: string; status: 'M' | 'A' | 'D' | 'U' | 'R' | 'C' }[];
-    }>(`/api/ssh/git-status?id=${encodeURIComponent(id)}&path=${encodeURIComponent(remotePath)}`),
+    }>(`/api/ssh/git-status?${params.toString()}`);
+  },
 };

@@ -2,7 +2,59 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { spawn } from 'child_process';
+import { existsSync } from 'fs';
+import { join, resolve } from 'path';
 import { McpServer } from './mcp-server.entity';
+import {
+  findStockEntry,
+  AUTO_PROVISIONED_STOCK_SERVERS,
+} from './mcp-stock';
+
+/**
+ * Repository root marker. The bundled agent-skills MCP server lives at
+ * `<repo>/server/agent-skills/mcp/server.mjs`, so stdio stock entries may use
+ * the `{SM_REPO_ROOT}` token in command/args; it is expanded at spawn time.
+ */
+function findRepoRoot(): string {
+  let dir = resolve(__dirname);
+  for (let depth = 0; depth < 8; depth++) {
+    if (existsSync(join(dir, 'pnpm-workspace.yaml'))) return dir;
+    const parent = resolve(dir, '..');
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return process.cwd();
+}
+
+let SM_REPO_ROOT: string | null = null;
+function repoRoot(): string {
+  if (!SM_REPO_ROOT) {
+    // Desktop launcher sets SM_REPO_ROOT explicitly (packaged installs have no
+    // pnpm-workspace.yaml to walk up to and cwd is the app bundle).
+    SM_REPO_ROOT =
+      (process.env.SM_REPO_ROOT && process.env.SM_REPO_ROOT.trim() ? process.env.SM_REPO_ROOT.trim() : null) ||
+      findRepoRoot();
+  }
+  return SM_REPO_ROOT;
+}
+
+function expandStdioTokens(command: string, args: string[]): { command: string; args: string[] } {
+  if (!command.includes('{SM_REPO_ROOT}') && !args.some((a) => a.includes('{SM_REPO_ROOT}'))) {
+    return { command, args };
+  }
+  const root = repoRoot();
+  return { command: command.replaceAll('{SM_REPO_ROOT}', root), args: args.map((a) => a.replaceAll('{SM_REPO_ROOT}', root)) };
+}
+
+/**
+ * Known-deprecated stock recipes. Rows saved under these (command, args) pairs
+ * are silently upgraded to the current stock-catalog recipe before they are
+ * tested or activated, so servers added under an older config keep working
+ * without requiring the user to re-add them.
+ */
+const LEGACY_STOCK_CONFIGS: Record<string, Array<{ command: string; args: string[] }>> = {
+  amazon: [{ command: 'uvx', args: ['amazon-mcp'] }],
+};
 
 // ── MCP JSON-RPC client ────────────────────────────────────────────────────
 
@@ -35,6 +87,8 @@ export interface McpOAuthMetadata {
   tokenEndpoint: string;
   registrationEndpoint?: string;
   scopesSupported?: string[];
+  /** Scopes advertised by the protected resource (not the auth server). */
+  resourceScopes?: string[];
   tokenEndpointAuthMethods?: string[];
 }
 
@@ -174,6 +228,48 @@ function createHttpClient(
  *      returned by the endpoint itself
  * Returns the authorization-server endpoints for the DCR + PKCE flow.
  */
+/**
+ * Discovery fallback for Google's hosted MCP servers (Drive, Docs, Gmail,
+ * Calendar, Tasks, ...). Google does not publish oauth-protected-resource
+ * metadata that is reachable anonymously, so the standard discovery always
+ * fails. These endpoints are served behind Google's OAuth 2.0 server, whose
+ * authorization-server metadata IS publicly fetchable via the OIDC discovery
+ * document. Returns null for non-Google hosts so other providers keep their
+ * regular well-known/401 discovery.
+ */
+export async function discoverGoogleMcpMetadata(url: string): Promise<McpOAuthMetadata | null> {
+  let host: string;
+  try {
+    host = new URL(url).host.toLowerCase();
+  } catch {
+    return null;
+  }
+  const isGoogleMcp = host === 'googleapis.com' || host.endsWith('.googleapis.com');
+  if (!isGoogleMcp) return null;
+
+  const fallback: McpOAuthMetadata = {
+    authorizationEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
+    tokenEndpoint: 'https://oauth2.googleapis.com/token',
+    registrationEndpoint: undefined,
+    scopesSupported: ['openid'],
+  };
+  try {
+    const res = await fetch('https://accounts.google.com/.well-known/openid-configuration', {
+      headers: { accept: 'application/json' },
+    });
+    if (!res.ok) return fallback;
+    const oidc = (await res.json()) as { authorization_endpoint?: string; token_endpoint?: string };
+    return {
+      authorizationEndpoint: oidc.authorization_endpoint ?? fallback.authorizationEndpoint,
+      tokenEndpoint: oidc.token_endpoint ?? fallback.tokenEndpoint,
+      registrationEndpoint: undefined, // Google has no DCR for personal accounts — user supplies client id/secret.
+      scopesSupported: ['openid'],
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 export async function discoverOAuthMetadata(url: string, logger: Logger): Promise<McpOAuthMetadata> {
   const normalized = url.replace(/\/+$/, '');
   const urlObj = new URL(normalized);
@@ -231,6 +327,10 @@ export async function discoverOAuthMetadata(url: string, logger: Logger): Promis
   }
 
   if (!resourceUrl) {
+    // Google's hosted MCP endpoints are not discoverable anonymously — use
+    // their public OIDC authorization-server metadata instead.
+    const googleMeta = await discoverGoogleMcpMetadata(url);
+    if (googleMeta) return googleMeta;
     throw new Error(`OAuth not supported by ${url} (no resource metadata)`);
   }
   const resourceMeta = await fetch(resourceUrl, { headers: { accept: 'application/json' } });
@@ -255,6 +355,9 @@ export async function discoverOAuthMetadata(url: string, logger: Logger): Promis
     tokenEndpoint: meta.token_endpoint,
     registrationEndpoint: meta.registration_endpoint,
     scopesSupported: meta.scopes_supported,
+    // Prefer the protected-resource scope list: providers such as Supabase and
+    // Railway only accept their resource's scopes (not the auth server's).
+    resourceScopes: resource.scopes_supported,
     tokenEndpointAuthMethods: meta.token_endpoint_auth_methods_supported,
   };
 }
@@ -273,7 +376,7 @@ export async function registerOAuthClient(
     grant_types: ['authorization_code', 'refresh_token'],
     response_types: ['code'],
     token_endpoint_auth_method: 'client_secret_post',
-    scope: (metadata.scopesSupported ?? []).filter((s) => !s.startsWith('openid')).join(' '),
+    scope: (metadata.resourceScopes ?? metadata.scopesSupported ?? []).filter((s) => !s.startsWith('openid')).join(' '),
   };
   const res = await fetch(metadata.registrationEndpoint, {
     method: 'POST',
@@ -329,29 +432,22 @@ export async function exchangeOAuthCode(metadata: McpOAuthMetadata, opts: {
   redirectUri: string;
   verifier: string;
 }): Promise<{ accessToken: string; refreshToken: string | null; expiresIn: number }> {
-  const params = new URLSearchParams({
-    grant_type: 'authorization_code',
-    code: opts.code,
-    redirect_uri: opts.redirectUri,
-    client_id: opts.clientId,
-    client_secret: opts.clientSecret,
-    code_verifier: opts.verifier,
-  });
-  const res = await fetch(metadata.tokenEndpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-    body: params.toString(),
-  });
-  const json = (await res.json().catch(() => ({}))) as {
-    access_token?: string;
-    refresh_token?: string;
-    expires_in?: number;
-    error?: string;
-    error_description?: string;
+  const attempt = async (useSecret: boolean): Promise<Response> => {
+    const params = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: opts.code,
+      redirect_uri: opts.redirectUri,
+      client_id: opts.clientId,
+      code_verifier: opts.verifier,
+    });
+    if (useSecret && opts.clientSecret) params.set('client_secret', opts.clientSecret);
+    return fetch(metadata.tokenEndpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      body: params.toString(),
+    });
   };
-  if (!res.ok || !json.access_token) {
-    throw new Error(`Token exchange failed: ${json.error_description ?? json.error ?? `HTTP ${res.status}`}`);
-  }
+  const json = await postWithConfidentialFallback(attempt, (b) => b.access_token, 'Token exchange failed');
   return {
     accessToken: json.access_token,
     refreshToken: json.refresh_token ?? null,
@@ -364,17 +460,48 @@ export async function refreshOAuthAccessTokenV2(metadata: McpOAuthMetadata, opts
   clientSecret: string;
   refreshToken: string;
 }): Promise<{ accessToken: string; refreshToken: string | null; expiresIn: number }> {
-  const params = new URLSearchParams({
-    grant_type: 'refresh_token',
-    refresh_token: opts.refreshToken,
-    client_id: opts.clientId,
-    client_secret: opts.clientSecret,
-  });
-  const res = await fetch(metadata.tokenEndpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-    body: params.toString(),
-  });
+  const attempt = async (useSecret: boolean): Promise<Response> => {
+    const params = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: opts.refreshToken,
+      client_id: opts.clientId,
+    });
+    if (useSecret && opts.clientSecret) params.set('client_secret', opts.clientSecret);
+    return fetch(metadata.tokenEndpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      body: params.toString(),
+    });
+  };
+  const json = await postWithConfidentialFallback(attempt, (b) => b.access_token, 'Token refresh failed');
+  return {
+    accessToken: json.access_token,
+    refreshToken: json.refresh_token ?? opts.refreshToken,
+    expiresIn: json.expires_in ?? 3600,
+  };
+}
+
+/**
+ * POST to the token endpoint, first as a confidential client (secret in body).
+ * Some providers (e.g. Railway) silently register DCR clients as PUBLIC
+ * (`token_endpoint_auth_method: none`), so a `401 invalid_client` means we
+ * must retry once without the secret (PKCE-only).
+ */
+async function postWithConfidentialFallback(
+  attempt: (useSecret: boolean) => Promise<Response>,
+  access: (b: any) => string | undefined,
+  label: string,
+): Promise<{ access_token?: string; refresh_token?: string; expires_in?: number; error?: string; error_description?: string }> {
+  let res = await attempt(true);
+  if (res.status === 401) {
+    const first = (await res.json().catch(() => ({}))) as { error?: string; error_description?: string };
+    const clientAuthFailed = /invalid_client/i.test(`${first.error ?? ''} ${first.error_description ?? ''}`);
+    if (clientAuthFailed) {
+      res = await attempt(false);
+    } else {
+      throw new Error(`${label}: ${first.error_description ?? first.error ?? `HTTP ${res.status}`}`);
+    }
+  }
   const json = (await res.json().catch(() => ({}))) as {
     access_token?: string;
     refresh_token?: string;
@@ -382,14 +509,10 @@ export async function refreshOAuthAccessTokenV2(metadata: McpOAuthMetadata, opts
     error?: string;
     error_description?: string;
   };
-  if (!res.ok || !json.access_token) {
-    throw new Error(`Token refresh failed: ${json.error_description ?? json.error ?? `HTTP ${res.status}`}`);
+  if (!res.ok || !access(json)) {
+    throw new Error(`${label}: ${json.error_description ?? json.error ?? `HTTP ${res.status}`}`);
   }
-  return {
-    accessToken: json.access_token,
-    refreshToken: json.refresh_token ?? opts.refreshToken,
-    expiresIn: json.expires_in ?? 3600,
-  };
+  return json;
 }
 
 /**
@@ -427,8 +550,9 @@ function createStdioClient(
   env: Record<string, string>,
   logger: Logger,
 ): Promise<McpServerHandle> {
+  const { command: cmd, args: argList } = expandStdioTokens(command, args);
   const fullEnv = buildChildEnv(env);
-  const child = spawn(command, args, {
+  const child = spawn(cmd, argList, {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: fullEnv,
     shell: false,
@@ -557,7 +681,7 @@ export interface McpRuntime {
   /** Tool name → server id lookup. */
   toolServerMap: Map<string, string>;
   /** All enabled server configs (name, description, id). */
-  configs: Array<{ id: string; name: string; description: string }>;
+  configs: Array<{ id: string; name: string; description: string; icon: string | null }>;
   /** Lazy-connect a server (spawn + init + tools/list). Returns existing handle if already connected. */
   activateServer(serverId: string): Promise<McpServerHandle>;
   /** Close all open handles. */
@@ -604,6 +728,13 @@ export class McpService {
     env?: Record<string, string>;
     url?: string;
     enabled?: boolean;
+    oauthClientId?: string;
+    oauthClientSecret?: string;
+    oauthScopes?: string;
+    apiToken?: string;
+    icon?: string;
+    category?: string;
+    tags?: string[];
   }): Promise<McpServer> {
     const entity = this.repo.create({
       userId,
@@ -613,8 +744,15 @@ export class McpService {
       command: dto.command ?? '',
       argsJson: dto.args ? JSON.stringify(dto.args) : null,
       envJson: dto.env ? JSON.stringify(dto.env) : null,
-      url: dto.transport === 'http' ? (dto.url ?? null) : null,
-      enabled: dto.enabled ?? true,
+url: dto.transport === 'http' ? (dto.url ?? null) : null,
+    oauthClientId: dto.oauthClientId ?? null,
+    oauthClientSecret: dto.oauthClientSecret ?? null,
+    oauthScopes: dto.oauthScopes ?? null,
+    apiToken: dto.transport === 'http' ? (dto.apiToken ?? null) : null,
+    enabled: dto.enabled ?? true,
+    icon: dto.icon ?? null,
+    category: dto.category ?? null,
+    tags: dto.tags?.length ? dto.tags : null,
     });
     return this.repo.save(entity);
   }
@@ -630,9 +768,14 @@ export class McpService {
     enabled?: boolean;
     oauthClientId?: string;
     oauthClientSecret?: string;
+    oauthScopes?: string;
     oauthAccessToken?: string;
     oauthRefreshToken?: string;
     oauthExpiresAt?: number;
+    apiToken?: string;
+    icon?: string;
+    category?: string;
+    tags?: string[];
   }): Promise<McpServer> {
     const entity = await this.repo.findOne({ where: { id, userId } });
     if (!entity) throw new Error(`MCP server ${id} not found`);
@@ -646,9 +789,14 @@ export class McpService {
     if (dto.enabled !== undefined) entity.enabled = dto.enabled;
     if (dto.oauthClientId !== undefined) entity.oauthClientId = dto.oauthClientId;
     if (dto.oauthClientSecret !== undefined) entity.oauthClientSecret = dto.oauthClientSecret;
+    if (dto.oauthScopes !== undefined) entity.oauthScopes = dto.oauthScopes;
     if (dto.oauthAccessToken !== undefined) entity.oauthAccessToken = dto.oauthAccessToken;
     if (dto.oauthRefreshToken !== undefined) entity.oauthRefreshToken = dto.oauthRefreshToken;
     if (dto.oauthExpiresAt !== undefined) entity.oauthExpiresAt = dto.oauthExpiresAt ? String(dto.oauthExpiresAt) : null;
+    if (dto.apiToken !== undefined) entity.apiToken = dto.apiToken?.trim() ? dto.apiToken.trim() : null;
+    if (dto.icon !== undefined) entity.icon = dto.icon ?? null;
+    if (dto.category !== undefined) entity.category = dto.category ?? null;
+    if (dto.tags !== undefined) entity.tags = dto.tags?.length ? dto.tags : null;
     return this.repo.save(entity);
   }
 
@@ -656,7 +804,127 @@ export class McpService {
     await this.repo.delete({ id, userId });
   }
 
+  /**
+   * Bulk-imports validated MCP entries. Duplicate names are skipped, not
+   * overwritten. Returns per-name results so the caller can surface them.
+   */
+  async importServers(userId: string, entries: Array<{
+    name: string;
+    description?: string;
+    transport?: 'stdio' | 'http';
+    command?: string;
+    args?: string[];
+    env?: Record<string, string>;
+    url?: string;
+    icon?: string;
+    oauthClientId?: string;
+    oauthClientSecret?: string;
+    oauthScopes?: string;
+    apiToken?: string;
+    category?: string;
+    tags?: string[];
+  }>): Promise<{ created: Array<{ id: string; name: string }>; skipped: Array<{ name: string; reason: string }> }> {
+    const existing = await this.listServers(userId);
+    const seen = new Set(existing.map((s) => s.name.trim().toLowerCase()));
+    const created: Array<{ id: string; name: string }> = [];
+    const skipped: Array<{ name: string; reason: string }> = [];
+    for (const entry of entries) {
+      if (seen.has(entry.name.trim().toLowerCase())) {
+        skipped.push({ name: entry.name, reason: 'Already exists — skipped (no overwrite)' });
+        continue;
+      }
+      const entity = await this.createServer(userId, entry);
+      seen.add(entity.name.trim().toLowerCase());
+      created.push({ id: entity.id, name: entity.name });
+    }
+    return { created, skipped };
+  }
+
+  /**
+   * Batch-create servers (used by the agent's "add MCP" popup). Rejects items
+   * that are missing required credentials when the server needs them (enabling
+   * a server without keys/OAuth would brick it at activation time).
+   */
+  async createManyServers(
+    userId: string,
+    entries: Array<{
+      name: string;
+      description?: string;
+      transport?: 'stdio' | 'http';
+      command?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      url?: string;
+      enabled?: boolean;
+      oauthClientId?: string;
+      oauthClientSecret?: string;
+      oauthScopes?: string;
+      apiToken?: string;
+      icon?: string;
+      category?: string;
+      tags?: string[];
+    }>,
+  ): Promise<{
+    created: Array<{ id: string; name: string; transport: string; needsSetup: boolean }>;
+    skipped: Array<{ name: string; reason: string }>;
+  }> {
+    const existing = await this.listServers(userId);
+    const seen = new Set(existing.map((s) => s.name.trim().toLowerCase()));
+    const created: Array<{ id: string; name: string; transport: string; needsSetup: boolean }> = [];
+    const skipped: Array<{ name: string; reason: string }> = [];
+
+    for (const entry of entries) {
+      const lowerName = entry.name.trim().toLowerCase();
+      if (seen.has(lowerName)) {
+        skipped.push({ name: entry.name, reason: 'Already exists — skipped (no overwrite)' });
+        continue;
+      }
+      const env = entry.env ?? {};
+      const needsKeys = Object.values(env).some((v) => v === undefined || v === '');
+      if (entry.enabled && needsKeys) {
+        skipped.push({ name: entry.name, reason: 'Missing required credentials — fill in the keys before enabling.' });
+        continue;
+      }
+      const entity = await this.createServer(userId, entry);
+      seen.add(entity.name.trim().toLowerCase());
+      const transport = entry.transport ?? 'stdio';
+      created.push({ id: entity.id, name: entity.name, transport, needsSetup: needsKeys || transport === 'http' || !entry.enabled });
+    }
+    return { created, skipped };
+  }
+
   // ── MCP runtime lifecycle (called by agent) ─────────────────────────────
+
+  /**
+   * Create + enable the bundled, keyless stock servers the agent is expected to
+   * use during runs (agent-skills-*). Idempotent: existing rows (enabled or
+   * disabled) are left untouched — a user's explicit disable is respected —
+   * so it only fills the gap on fresh installs / empty stores.
+   */
+  async ensureAutoProvisioned(userId: string): Promise<void> {
+    const existing = await this.listServers(userId);
+    const existingNames = new Set(existing.map((s) => s.name.trim().toLowerCase()));
+    for (const name of AUTO_PROVISIONED_STOCK_SERVERS) {
+      if (existingNames.has(name)) continue;
+      const stock = findStockEntry(name);
+      if (!stock) continue;
+      await this.createServer(userId, {
+        name: stock.name,
+        description: stock.description,
+        transport: stock.transport,
+        command: stock.command,
+        args: stock.args,
+        url: stock.url ?? undefined,
+        icon: stock.icon ?? undefined,
+        category: stock.category,
+        tags: stock.tags,
+        enabled: true,
+      }).catch((err) =>
+        this.logger.warn(`[MCP] auto-provision "${name}" failed: ${err instanceof Error ? err.message : err}`),
+      );
+      existingNames.add(name);
+    }
+  }
 
   /**
    * Build the McpRuntime for a run: loads all enabled servers and their configs.
@@ -668,20 +936,16 @@ export class McpService {
       id: s.id,
       name: s.name,
       description: s.description,
+      icon: s.icon,
     }));
     const handles = new Map<string, McpServerHandle>();
     const toolServerMap = new Map<string, string>();
     let closed = false;
 
     const connect = async (srv: McpServer): Promise<McpServerHandle> => {
+      srv = await this.maybeUpgradeStockConfig(srv);
       if (srv.transport === 'http') {
-        if (!srv.url) throw new Error(`MCP server ${srv.name} missing URL`);
-        if (!srv.oauthAccessToken) throw new Error(`MCP server ${srv.name} not authorized — connect via OAuth first`);
-        return createHttpClient(
-          srv.url,
-          { authToken: srv.oauthAccessToken, onRefresh: async () => this.refreshHttpToken(srv) },
-          this.logger,
-        );
+        return this.connectHttpClient(srv);
       }
       const mcpArgs = srv.argsJson ? JSON.parse(srv.argsJson) as string[] : [];
       const mcpEnv = srv.envJson ? JSON.parse(srv.envJson) as Record<string, string> : {};
@@ -721,6 +985,29 @@ export class McpService {
   }
 
   /**
+   * If the stored server config matches a known-deprecated stock recipe (e.g.
+   * the old `uvx amazon-mcp` amazon entry that crashes under mcp SDK 2.x),
+   * rewrite the row to the current stock-catalog command/args and persist it.
+   * Returns the (possibly upgraded) server entity.
+   */
+  private async maybeUpgradeStockConfig(srv: McpServer): Promise<McpServer> {
+    const stock = findStockEntry(srv.name);
+    if (!stock?.command) return srv;
+    const key = srv.name.trim().toLowerCase();
+    const currentArgs = srv.argsJson ? (JSON.parse(srv.argsJson) as string[]) : [];
+    const legacy = LEGACY_STOCK_CONFIGS[key];
+    const isLegacy = Array.isArray(legacy)
+      ? legacy.some(
+          (l) => srv.command === l.command && JSON.stringify(currentArgs) === JSON.stringify(l.args),
+        )
+      : false;
+    if (!isLegacy) return srv;
+    const args = stock.args ?? [];
+    this.logger.log(`[MCP] upgrading legacy "${srv.name}" config to stock recipe: ${stock.command} ${args.join(' ')}`);
+    return this.updateServer(srv.id, srv.userId, { command: stock.command, args });
+  }
+
+  /**
    * Test connectivity: connect to a server, list tools, close.
    */
   async testConnection(serverId: string, userId: string): Promise<{
@@ -738,26 +1025,43 @@ export class McpService {
       return { ok: true, tools };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (srv.transport === 'http' && (msg.includes('not authorized') || msg.includes('HTTP 401'))) {
-        return { ok: false, needsOAuth: true, error: msg };
+      if (srv.transport === 'http') {
+        if (msg.includes('not authorized') || msg.includes('HTTP 401')) {
+          return { ok: false, needsOAuth: true, error: msg };
+        }
+        const hasOAuth = await discoverOAuthMetadata(srv.url ?? '', this.logger)
+          .then(() => true)
+          .catch(() => false);
+        if (hasOAuth) {
+          return { ok: false, needsOAuth: true, error: msg };
+        }
       }
       return { ok: false, error: msg };
     }
   }
 
   private async connectServer(srv: McpServer): Promise<McpServerHandle> {
+    srv = await this.maybeUpgradeStockConfig(srv);
     if (srv.transport === 'http') {
-      if (!srv.url) throw new Error(`MCP server ${srv.name} missing URL`);
-      if (!srv.oauthAccessToken) throw new Error(`MCP server ${srv.name} not authorized — connect via OAuth first`);
-      return createHttpClient(
-        srv.url,
-        { authToken: srv.oauthAccessToken, onRefresh: async () => this.refreshHttpToken(srv) },
-        this.logger,
-      );
+      return this.connectHttpClient(srv);
     }
     const mcpArgs = srv.argsJson ? JSON.parse(srv.argsJson) as string[] : [];
     const mcpEnv = srv.envJson ? JSON.parse(srv.envJson) as Record<string, string> : {};
     return createStdioClient(srv.command, mcpArgs, mcpEnv, this.logger);
+  }
+
+  private connectHttpClient(srv: McpServer): Promise<McpServerHandle> {
+    if (!srv.url) throw new Error(`MCP server ${srv.name} missing URL`);
+    const oauth = !!srv.oauthAccessToken;
+    const token = srv.apiToken ?? srv.oauthAccessToken;
+    const opts =
+      token && token.length > 0
+        ? {
+            authToken: token,
+            ...(oauth ? { onRefresh: async () => this.refreshHttpToken(srv) } : {}),
+          }
+        : {};
+    return createHttpClient(srv.url, opts, this.logger);
   }
 
   // ── OAuth for remote (http) MCP servers ─────────────────────────────────
@@ -780,7 +1084,21 @@ export class McpService {
 
     let clientId = srv.oauthClientId;
     let clientSecret = srv.oauthClientSecret;
-    if (!clientId || !clientSecret) {
+    if (!clientId) {
+      if (!meta.registrationEndpoint) {
+        const host = srv.url ? new URL(srv.url).host : 'this server';
+        const isGoogle = !!srv.url && /googleapis\.com$/i.test(new URL(srv.url).host);
+        throw new Error(
+          isGoogle
+            ? `OAuth needs your own Google Cloud client for ${host}. Create one at ` +
+              `https://console.cloud.google.com/apis/credentials (Basics → Consent screen → Credentials → ` +
+              `Create Credentials → OAuth client ID). Choose "Web application" and add redirect URI ` +
+              `${redirectUri}, then paste the Client ID and Secret below. ` +
+              `A "Desktop app" client works with only the Client ID (no secret).`
+            : `OAuth needs your own consumer credentials for ${host} — this server does not support ` +
+              `automatic client registration. Fill in the OAuth Client ID (and Secret if your client provides one) first.`,
+        );
+      }
       const reg = await registerOAuthClient(meta, redirectUri, this.logger);
       clientId = reg.clientId;
       clientSecret = reg.clientSecret;
@@ -789,7 +1107,7 @@ export class McpService {
 
     const { verifier, challenge } = generatePkce();
     const state = require('crypto').randomBytes(24).toString('base64url');
-    const scope = (meta.scopesSupported ?? []).filter((s) => !s.startsWith('openid')).join(' ');
+    const scope = srv.oauthScopes || (meta.resourceScopes ?? meta.scopesSupported ?? []).filter((s) => !s.startsWith('openid')).join(' ');
     const authUrl = buildOAuthAuthorizeUrl(meta, {
       clientId,
       redirectUri,
@@ -838,6 +1156,7 @@ export class McpService {
       oauthExpiresAt: tokens.expiresIn ? String(Date.now() + tokens.expiresIn * 1000) : null,
       oauthClientId: entry.clientId,
       oauthClientSecret: entry.clientSecret,
+      apiToken: null,
     });
     const updated = await this.repo.findOne({ where: { id: entry.serverId, userId: entry.userId } });
     return updated;
@@ -851,6 +1170,7 @@ export class McpService {
       oauthAccessToken: null,
       oauthRefreshToken: null,
       oauthExpiresAt: null,
+      apiToken: null,
     });
   }
 

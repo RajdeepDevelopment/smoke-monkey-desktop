@@ -32,6 +32,19 @@ export interface ContextSnapshot {
   decisions: string[];
   errors: string[];
   plan: TodoItem[];
+  /**
+   * Sub-contexts left ACTIVE at the end of the previous run. Re-used on the
+   * next run so the session's guidance set is NOT reset — only the LLM removes
+   * a sub-context by calling context_manage(action="deactivate", ...). Absent
+   * on sessions created before the field existed.
+   */
+  activeSubContexts?: string[];
+  /**
+   * Active sub-contexts WITH titles, persisted alongside `activeSubContexts`
+   * so the UI can restore the live context bar with real names after a refresh
+   * (the FE has no catalog of sub-context titles).
+   */
+  activeContexts?: Array<{ id: string; title: string }>;
 }
 
 /**
@@ -100,6 +113,12 @@ export interface RunContext {
    */
   finishSignal: { summary: string } | null;
 
+  /** Server ids the user has already decided about (enable/add/skip) in this
+   *  run. inspect_mcp_stock pauses the loop for user-actionable
+   *  recommendations, but servers in this set are never re-asked — otherwise
+   *  every phase-boundary inspect would reopen the same popup. */
+  mcpAskedServerIds: Set<string>;
+
   /** Durable cross-run summary state; merged on every compaction. */
   snapshot: ContextSnapshot;
 
@@ -146,6 +165,14 @@ export interface RunContext {
    * to the model; deactivated servers are dormant but may be re-activated.
    */
   mcpRuntime?: McpRuntime;
+
+  /**
+   * All MCP servers the user configured for this run, keyed by server name
+   * (lowercase). Value = enabled flag. Used by the sub-context panel to
+   * annotate the category-wise stock-MCP roadmap with LIVE status
+   * (configured-active / configured-disabled / stock) + key-requirement.
+   */
+  mcpConfigured: Map<string, boolean>;
 }
 
 export const CHARS_PER_TOKEN = 4;
@@ -287,6 +314,8 @@ export function createEmptySnapshot(task: string): ContextSnapshot {
     decisions: [],
     errors: [],
     plan: [],
+    activeSubContexts: [],
+    activeContexts: [],
   };
 }
 
@@ -457,7 +486,7 @@ export function safeParseObject(raw: unknown): Record<string, unknown> {
 export type ToolGroupName = 'core' | 'exploration' | 'editing' | 'verification' | 'git' | 'docker';
 
 export const TOOL_GROUPS: Record<ToolGroupName, string[]> = {
-  core: ['read_file', 'list_directory', 'inspect', 'todo_write', 'ask_user', 'context_manage', 'finish_task', 'secret_manager'],
+  core: ['read_file', 'list_directory', 'inspect', 'todo_write', 'ask_user', 'context_manage', 'finish_task', 'secret_manager', 'add_mcp_server', 'inspect_mcp_stock', 'request_mcp_approval'],
   exploration: ['glob', 'grep', 'find_symbol', 'search_code', 'run_command'],
   editing: ['edit_file', 'line_edit', 'replace_lines', 'write_file', 'apply_patch', 'delete_file'],
   verification: ['run_command', 'run_test'],
@@ -673,8 +702,8 @@ export function nextPhaseOnCall(phase: AgentPhase, toolName: string): AgentPhase
   switch (phase) {
     case 'understand':
     case 'explore':
-      if (toolName === 'todo_write') return 'plan';
       if (FILE_MUTATING_TOOLS.has(toolName)) return 'edit';
+      if (toolName === 'todo_write') return 'plan';
       if (phase === 'understand') return 'explore';
       return phase;
     case 'plan':
@@ -734,7 +763,7 @@ export function phaseDirective(phase: AgentPhase): string | null {
     case 'explore':
       return 'CURRENT PHASE: EXPLORE — Gather the minimum context needed using read/search tools. Base every claim on actual file contents, not guesses.';
     case 'plan':
-      return 'CURRENT PHASE: PLAN — Record concrete steps with todo_write, then immediately begin executing them.';
+      return 'CURRENT PHASE: PLAN — Record concrete steps with todo_write (keep the on-screen task list accurate), then immediately begin executing them.';
     case 'edit':
       return 'CURRENT PHASE: EDIT — Make the smallest correct changes, one logical change at a time. Do not start verifying until edits are coherent. To locate any symbol you must touch (definition, references, callers), call find_symbol or search_code FIRST — they resolve via the SQLite index in ~1ms instead of a full grep scan. Only use grep for fuzzy/regex text searches that a symbol lookup cannot answer.';
     case 'verify':

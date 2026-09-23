@@ -8,7 +8,6 @@ import { WorkspaceShortcuts } from './WorkspaceShortcuts';
 import { SidePanel } from './SidePanel';
 import { TopBar } from './TopBar';
 import { BottomPanel } from './BottomPanel';
-import { GlobalNavDrawer } from './GlobalNavDrawer';
 import type { RemoteConnectionState } from './StatusBar';
 import { ModeSwitcher } from './ModeSwitcher';
 import { type SimplePreviewFile } from './SimpleFilePreview';
@@ -50,15 +49,13 @@ interface SimpleSession {
 }
 
 export function AgentAppShell(props: AgentAppShellProps) {
-  const [navOpen, setNavOpen] = useState(false);
-
   useEffect(() => {
     initExternalLinkHandling();
   }, []);
 
   return (
     <WorkspaceProvider>
-      <ShellInner {...props} navOpen={navOpen} onToggleNav={() => setNavOpen((v) => !v)} />
+      <ShellInner {...props} />
     </WorkspaceProvider>
   );
 }
@@ -76,15 +73,13 @@ function ShellInner({
   gitChangeCount,
   remote,
   onRemoteChange,
-  navOpen,
-  onToggleNav,
   filePreview,
   sessionTitle,
   sessions,
   activeSessionId,
   onNewSession,
   onSelectSession,
-}: AgentAppShellProps & { navOpen: boolean; onToggleNav: () => void }) {
+}: AgentAppShellProps) {
   const { state, setUiMode } = useWorkspace();
   const simple = state.uiMode === 'simple';
 
@@ -93,17 +88,13 @@ function ShellInner({
       <WorkspaceShortcuts />
       <div className="workspace-bg flex h-screen flex-col overflow-hidden">
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          {/* Activity Bar */}
+          {/* Activity Bar — workspace tools + app-section redirects in one rail */}
           <ActivityBar
             isAgentRunning={isAgentRunning}
             gitChangeCount={gitChangeCount}
-            onToggleGlobalNav={onToggleNav}
             simple={simple}
             remote={remote}
           />
-
-          {/* Global sections sidebar — pushes content, never overlays */}
-          <GlobalNavDrawer open={navOpen} onClose={onToggleNav} />
 
           {/* Side Panel (Explorer/Search/SCM/Sessions) — slides in, pushing content */}
           <SidePanel pushAnimation={simple}>{sidePanelContent}</SidePanel>
@@ -239,7 +230,7 @@ function SimpleTopBar({
             onClick={() => setHistoryOpen(false)}
             className="fixed inset-0 z-20 cursor-default bg-transparent"
           />
-          <div className="absolute right-2 top-full z-30 mt-1 w-72 overflow-hidden overflow-y-auto glass-panel rounded-lg border border-border/60 p-1.5 shadow-xl scrollbar-thin">
+          <div className="absolute right-2 top-full z-30 mt-1 max-h-[70vh] w-72 overflow-hidden overflow-y-auto glass-panel rounded-lg border border-border/60 p-1.5 shadow-xl scrollbar-thin">
             {(() => {
               const now = new Date();
               const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();

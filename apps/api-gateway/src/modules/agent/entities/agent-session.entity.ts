@@ -7,7 +7,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 
-export type AgentStatus = 'idle' | 'running' | 'waiting_permission' | 'waiting_user_input' | 'interrupted' | 'completed' | 'failed';
+export type AgentStatus = 'idle' | 'running' | 'waiting_permission' | 'waiting_user_input' | 'waiting_mcp_approval' | 'interrupted' | 'completed' | 'failed';
 export type AgentId = 'build' | 'plan' | 'explore' | 'general';
 
 @Entity('agent_sessions')

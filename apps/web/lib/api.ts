@@ -6,9 +6,9 @@ import type {
   MetricsSummaryDto,
   ModelsResponseDto,
   OmniRouteModelsResponseDto,
+  OmniRouteRankedResponseDto,
   OmniRouteStatusDto,
   OnboardingStateDto,
-  RetrieveResponseDto,
   UserKeyDto,
   UserKeysResponseDto,
   UserSettingsDto,
@@ -22,13 +22,27 @@ import type {
   AgentRunDto,
   AgentEventDto,
   AgentToolDto,
+  McpCreateResultDto,
   McpServersResponseDto,
+  McpStockCatalogResponseDto,
   McpTestResultDto,
   McpOAuthStartResultDto,
+  McpImportResultDto,
+  ShareStatusDto,
+  ShareConfigDto,
+  TunnelStatusDto,
+  DeployPagesResultDto,
 } from '@rag/contracts';
 import { streamSse } from './sse';
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+/**
+ * API base. When served from the gateway itself (static web build + tunnel
+ * sharing, or a Cloudflare Pages deploy proxying /api), a relative base keeps
+ * all requests same-origin. The desktop shell overrides this via
+ * NEXT_PUBLIC_API_URL when the UI and gateway live on different origins, and
+ * its Rust proxy ignores the host anyway.
+ */
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 const TOKEN_KEY = 'rag_token';
 
@@ -267,6 +281,29 @@ export function agentAssetToBlob(asset: AgentAsset): Blob {
   return new Blob([bytes], { type: asset.mime || 'application/octet-stream' });
 }
 
+/** Lightweight existence + metadata probe — no base64 payload. */
+export interface AgentAssetProbe {
+  ok: boolean;
+  name: string;
+  path: string;
+  mime: string;
+  size: number;
+}
+
+export async function probeAgentAsset(filePath: string): Promise<AgentAssetProbe> {
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers.authorization = `Bearer ${token}`;
+  const res = await nativeFetch(
+    `${API_URL}/api/agent/file/asset?path=${encodeURIComponent(filePath)}&probe=1`,
+    { headers, credentials: 'include' },
+  );
+  if (!res.ok) throw new ApiError(`Asset probe failed (${res.status})`, res.status);
+  const body = (await res.json()) as Partial<AgentAssetProbe>;
+  if (!body?.ok) throw new Error('Asset not found');
+  return body as AgentAssetProbe;
+}
+
 /** Trigger a client-side download of an agent asset. */
 export function downloadAgentAsset(asset: AgentAsset): void {
   const blob = agentAssetToBlob(asset);
@@ -422,23 +459,11 @@ export const api = {
   // models
   fetchModels: () => request<ModelsResponseDto>('/api/models'),
   fetchOmniRouteModels: () => request<OmniRouteModelsResponseDto>('/api/models/omniroute'),
+  fetchOmniRouteRanked: () => request<OmniRouteRankedResponseDto>('/api/models/omniroute/ranked'),
   fetchOpenRouterModels: () => request<OmniRouteModelsResponseDto>('/api/models/openrouter'),
 
   // OmniRoute provisioning lifecycle (drives the "Initializing OmniRoute…" UI)
   fetchOmniRouteStatus: () => request<OmniRouteStatusDto>('/api/settings/omniroute/status'),
-
-  // playground (retrieval only, no generation)
-  playgroundRetrieve: (payload: {
-    message: string;
-    mode?: string;
-    provider?: string;
-    model?: string;
-    documentIds?: string[];
-  }) =>
-    request<RetrieveResponseDto>('/api/playground/retrieve', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
 
   // analytics (Redis telemetry summary)
   analyticsMetrics: () => request<MetricsSummaryDto>('/api/analytics/metrics'),
@@ -538,15 +563,27 @@ export const api = {
   // ── MCP Servers ──────────────────────────────────────────────────────────
   listMcpServers: () =>
     request<McpServersResponseDto>('/api/mcp'),
-  createMcpServer: (data: { name: string; description?: string; transport?: 'stdio' | 'http'; command: string; args?: string[]; env?: Record<string, string>; url?: string }) =>
-    request<{ id: string; name: string }>('/api/mcp', {
+  listMcpStockCatalog: () =>
+    request<McpStockCatalogResponseDto>('/api/mcp/stock'),
+  createMcpServer: (data: { name: string; description?: string; transport?: 'stdio' | 'http'; command: string; args?: string[]; env?: Record<string, string>; url?: string; enabled?: boolean; oauthClientId?: string; oauthClientSecret?: string; oauthScopes?: string; apiToken?: string; icon?: string; category?: string; tags?: string[] }) =>
+    request<McpCreateResultDto>('/api/mcp', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  updateMcpServer: (id: string, data: { name?: string; description?: string; transport?: 'stdio' | 'http'; command?: string; args?: string[]; env?: Record<string, string>; url?: string; enabled?: boolean }) =>
+  createMcpServersBatch: (servers: Array<{ name: string; description?: string; transport?: 'stdio' | 'http'; command?: string; args?: string[]; env?: Record<string, string>; url?: string; enabled?: boolean; oauthClientId?: string; oauthClientSecret?: string; oauthScopes?: string; apiToken?: string; icon?: string; category?: string; tags?: string[] }>) =>
+    request<{ created: Array<{ id: string; name: string; transport: string; needsSetup: boolean }>; skipped: Array<{ name: string; reason: string }> }>('/api/mcp/create-many', {
+      method: 'POST',
+      body: JSON.stringify({ servers }),
+    }),
+  updateMcpServer: (id: string, data: { name?: string; description?: string; transport?: 'stdio' | 'http'; command?: string; args?: string[]; env?: Record<string, string>; url?: string; enabled?: boolean; oauthClientId?: string; oauthClientSecret?: string; oauthScopes?: string; apiToken?: string; icon?: string; category?: string; tags?: string[] }) =>
     request<{ id: string; name: string }>(`/api/mcp/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
+    }),
+  importMcpServers: (payload: unknown) =>
+    request<McpImportResultDto>('/api/mcp/import', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
   deleteMcpServer: (id: string) =>
     request<{ status: string }>(`/api/mcp/${id}`, { method: 'DELETE' }),
@@ -556,4 +593,43 @@ export const api = {
     request<McpOAuthStartResultDto>(`/api/mcp/${id}/oauth/start`, { method: 'POST' }),
   disconnectMcpOAuth: (id: string) =>
     request<{ status: string }>(`/api/mcp/${id}/oauth/disconnect`, { method: 'POST' }),
+
+  // ── Share / Hosting (Cloudflare) ────────────────────────────────────────
+  getShareStatus: () =>
+    request<ShareStatusDto>('/api/share'),
+  getShareConfig: () =>
+    request<ShareConfigDto>('/api/share/config'),
+  updateShareConfig: (data: {
+    projectName?: string;
+    accountId?: string;
+    apiToken?: string;
+    tunnelHostname?: string;
+    tunnelId?: string;
+    outputDir?: string;
+    pagesProjectName?: string;
+  }) =>
+    request<ShareConfigDto>('/api/share/config', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  startQuickTunnel: (url?: string) =>
+    request<TunnelStatusDto>('/api/share/tunnel/start', {
+      method: 'POST',
+      body: JSON.stringify(url ? { url } : {}),
+    }),
+  stopQuickTunnel: () =>
+    request<TunnelStatusDto>('/api/share/tunnel/stop', { method: 'POST' }),
+  startPersistentTunnel: () =>
+    request<TunnelStatusDto>('/api/share/tunnel/persistent/start', { method: 'POST' }),
+  stopPersistentTunnel: () =>
+    request<TunnelStatusDto>('/api/share/tunnel/persistent/stop', { method: 'POST' }),
+  deployToPages: (projectName?: string) =>
+    request<DeployPagesResultDto>('/api/share/deploy/pages', {
+      method: 'POST',
+      body: JSON.stringify(projectName ? { projectName } : {}),
+    }),
+  wranglerLogin: () =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/share/wrangler/login', { method: 'POST' }),
+  wranglerLogout: () =>
+    request<{ ok: boolean; output?: string; error?: string }>('/api/share/wrangler/logout', { method: 'POST' }),
 };

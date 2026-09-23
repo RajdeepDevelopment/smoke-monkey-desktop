@@ -34,6 +34,8 @@ import { SecretsModule } from './modules/secrets/secrets.module';
 import { OmniRouteModule } from './modules/omniroute/omniroute.module';
 import { McpModule } from './modules/mcp/mcp.module';
 import { McpServer } from './modules/mcp/mcp-server.entity';
+import { ShareModule } from './modules/share/share.module';
+import { ShareConfig } from './modules/share/share.entity';
 
 @Module({
   imports: [
@@ -43,7 +45,7 @@ import { McpServer } from './modules/mcp/mcp-server.entity';
       inject: [ConfigService],
       useFactory: (config: ConfigService) =>
         buildTypeOrmOptions(config, {
-          entities: [User, DocumentEntity, Conversation, Message, UserApiKey, UserSecret, AgentSession, AgentRun, AgentMessage, AgentFileChange, AgentPermission, SshConnection, McpServer],
+          entities: [User, DocumentEntity, Conversation, Message, UserApiKey, UserSecret, AgentSession, AgentRun, AgentMessage, AgentFileChange, AgentPermission, SshConnection, McpServer, ShareConfig],
         }),
     }),
     CommonModule,
@@ -63,6 +65,7 @@ import { McpServer } from './modules/mcp/mcp-server.entity';
     SshModule,
     OmniRouteModule,
     McpModule,
+    ShareModule,
   ],
   providers: [
     {

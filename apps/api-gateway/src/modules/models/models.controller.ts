@@ -1,5 +1,10 @@
 import { Controller, Get, Logger } from '@nestjs/common';
 import { OPENCODE_ZEN_MODEL_IDS, OPENCODE_ZEN_MODELS } from '../../common/constants/opencode-models';
+import {
+  isOmniRouteFreeModel,
+  omnirouteNamespace,
+} from './omniroute-models.lib';
+import { OmniRouteModelHealthService, OmniRouteModelEntry } from './omniroute-health.service';
 
 const FALLBACK_MODELS_RESPONSE = {
   providers: [
@@ -179,6 +184,8 @@ export class ModelsController {
   private readonly logger = new Logger(ModelsController.name);
   private readonly ragUrl = process.env.RAG_SERVICE_URL || 'http://127.0.0.1:8643';
 
+  constructor(private readonly omniRouteHealth: OmniRouteModelHealthService) {}
+
   @Get()
   async getModels() {
     try {
@@ -217,12 +224,13 @@ export class ModelsController {
 
   @Get('omniroute')
   async getOmniRouteModels(): Promise<{ reachable: boolean; models: unknown[] }> {
-    // Internally fetch the REAL OmniRoute gateway (:20128/v1/models) with the
-    // provisioned manage key and feed its model list to the UI. The gateway is
-    // auto-started + keyed by OmniRouteService on login/bootstrap, so this is
-    // the authoritative set of models the agent/chat can actually use.
+    // Pull the REAL OmniRoute gateway (:20128/v1/models) model list, overlay the
+    // live health/ranking snapshot from OmniRouteModelHealthService (availability,
+    // latency, keyRequired, image capability, family/protocol), and return the
+    // set sorted fastest-first so the UI picker shows working free models first.
     const base = (process.env.OMNIROUTE_BASE_URL || 'http://localhost:20128/v1').replace(/\/+$/, '');
     const key = process.env.OMNIROUTE_API_KEY || '';
+    let catalog: Array<{ id?: string; name?: string }> = [];
     try {
       const res = await fetch(`${base}/models`, {
         headers: { authorization: `Bearer ${key}` },
@@ -230,37 +238,76 @@ export class ModelsController {
       });
       if (!res.ok) {
         this.logger.warn(`real OmniRoute /models responded with ${res.status}`);
-        return { reachable: false, models: [] };
+        return this.rankedFallback();
       }
       const data = (await res.json()) as { data?: Array<{ id?: string }> };
-      const models: unknown[] = [];
-      const seen = new Set<string>();
-      for (const item of data.data || []) {
-        const id = String(item.id || '').trim();
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
-        const namespace = id.split('/', 1)[0].toLowerCase() || 'omniroute';
-        models.push({
-          id,
-          name: id,
-          provider: namespace,
-          isFree: isOmniRouteFreeModel(id, namespace),
-        });
-      }
-      return { reachable: true, models };
+      catalog = data.data || [];
     } catch (err) {
-      this.logger.warn(`real OmniRoute models lookup failed: ${err instanceof Error ? err.message : err}`);
-      return { reachable: false, models: [] };
+      this.logger.warn(
+        `real OmniRoute models lookup failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return this.rankedFallback();
     }
-  }
-}
 
-function isOmniRouteFreeModel(id: string, _namespace: string): boolean {
-  const lower = id.toLowerCase();
-  // OmniRoute marks a model as free when "free" appears as a distinct token in
-  // its id (e.g. auto/coding:free, auto/best-free, oc/mimo-v2.5-free,
-  // oc/nemotron-3-ultra-free). Namespaces alone (oc, auto, …) are NOT a free
-  // signal — oc/big-pickle, auto/pro-*, etc. are paid, so we must not flag
-  // every id that merely contains "auto" or lives in a known namespace.
-  return /(^|[/:._-])free([/._:-]|$)/.test(lower) || lower.endsWith(':free');
+    const models: unknown[] = [];
+    const seen = new Set<string>();
+    for (const item of catalog) {
+      const id = String(item.id || '').trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const entry = this.omniRouteHealth.getModel(id);
+      models.push(
+        entry
+          ? this.omniRouteHealth.toModelDto(entry, item.name)
+          : {
+              id,
+              name: item.name || id,
+              provider: omnirouteNamespace(id),
+              isFree: isOmniRouteFreeModel(id),
+            },
+      );
+    }
+
+    const rank = new Map<string, number>();
+    this.omniRouteHealth.getRankedIds().forEach((id, i) => rank.set(id, i));
+    models.sort((a, b) => {
+      const ia = rank.get((a as { id: string }).id) ?? Number.MAX_SAFE_INTEGER;
+      const ib = rank.get((b as { id: string }).id) ?? Number.MAX_SAFE_INTEGER;
+      return ia - ib;
+    });
+
+    return { reachable: true, models };
+  }
+
+  /** Snapshot-driven fallback: serve last-ranked cached models when the live gateway list is unreachable. */
+  private rankedFallback(): { reachable: boolean; models: unknown[] } {
+    const ranked = this.omniRouteHealth.getRanked();
+    if (ranked.length > 0) {
+      return {
+        reachable: this.omniRouteHealth.getGatewayReachable(),
+        models: ranked.map((e) => this.omniRouteHealth.toModelDto(e)),
+      };
+    }
+    return { reachable: false, models: [] };
+  }
+
+  @Get('omniroute/ranked')
+  getOmniRouteRankedModels(): {
+    reachable: boolean;
+    gatewayReachable: boolean;
+    updatedAt: number | null;
+    nextCheckAt: number | null;
+    ranked: OmniRouteModelEntry[];
+    free: OmniRouteModelEntry[];
+  } {
+    const ranked = this.omniRouteHealth.getRanked();
+    return {
+      reachable: this.omniRouteHealth.getGatewayReachable(),
+      gatewayReachable: this.omniRouteHealth.getGatewayReachable(),
+      updatedAt: this.omniRouteHealth.getUpdatedAt(),
+      nextCheckAt: this.omniRouteHealth.getNextCheckAt(),
+      ranked,
+      free: ranked.filter((m) => m.isFree && m.isAvailable),
+    };
+  }
 }

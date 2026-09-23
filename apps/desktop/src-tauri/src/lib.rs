@@ -848,6 +848,10 @@ fn spawn_api_server(omni_bin: Option<&str>) -> Option<Child> {
     cmd.arg(api_main.to_str()?)
         .current_dir(project_root)
         .env("HOME", &home)
+        // Bundled stock servers (agent-skills MCP) may use the {SM_REPO_ROOT}
+        // token — pin it to the repo root so expansion never depends on the
+        // gateway's cwd or walking up from the bundle.
+        .env("SM_REPO_ROOT", project_root.to_str().unwrap_or_default())
         // GUI apps launched from Finder/Dock inherit a minimal PATH, so the
         // node child would not be able to resolve `npm`/`omniroute` when the
         // gateway's OmniRouteService installs/starts the OmniRoute gateway.

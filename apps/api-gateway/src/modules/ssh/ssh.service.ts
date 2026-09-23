@@ -6,6 +6,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { Client, type ConnectConfig } from 'ssh2';
 import { SshConnection, SshAuthMethod } from './entities/ssh-connection.entity';
+import { isSmokePath } from '../agent/workspace.service';
 import {
   Connector,
   ConnectorDestination,
@@ -233,7 +234,7 @@ export class SshService implements Connector {
   }
 
   private readonly IGNORE_DIRS = new Set([
-    'node_modules', '.git', '.next', 'dist', 'build', '.cache',
+    '.git', '.next', 'dist', 'build', '.cache',
     '__pycache__', 'target', 'coverage', '.venv', 'venv',
     '.pytest_cache', '.mypy_cache', '.ruff_cache', '.gradle',
   ]);
@@ -256,7 +257,6 @@ export class SshService implements Connector {
       const entries = await this.list(destinationId, userId, dir);
       const seen = new Set<string>();
       const sorted = entries.filter((e) => {
-        if (e.name.startsWith('.') && e.name !== '.') return false;
         if (e.type === 'directory' && this.IGNORE_DIRS.has(e.name)) return false;
         return !seen.has(e.name);
       });
@@ -285,18 +285,19 @@ export class SshService implements Connector {
     destinationId: string,
     userId: string,
     dir: string,
-  ): Promise<{ isRepo: boolean; branch?: string; ahead?: number; behind?: number; entries: { path: string; origPath?: string; x: string; y: string; status: 'M' | 'A' | 'D' | 'U' | 'R' | 'C' }[] }> {
+    opts?: { limit?: number; offset?: number },
+  ): Promise<{ isRepo: boolean; branch?: string; ahead?: number; behind?: number; total: number; entries: { path: string; origPath?: string; x: string; y: string; status: 'M' | 'A' | 'D' | 'U' | 'R' | 'C' }[] }> {
     const row = await this.getOrFail(userId, destinationId);
     const target = dir || row.remoteHome || '~';
     const runGit = (cmd: string) => this.execOn(row, cmd, { timeoutMs: 30_000 }).catch((): null => null);
     const out = await runGit(`cd ${quote(target)} 2>/dev/null && git rev-parse --is-inside-work-tree 2>/dev/null`);
     const isRepo = !!(out && out.exitCode === 0 && out.stdout.trim() === 'true');
-    if (!isRepo) return { isRepo: false, entries: [] };
+    if (!isRepo) return { isRepo: false, entries: [], total: 0 };
 
     const [bOut, abOut, stOut] = await Promise.all([
       runGit(`cd ${quote(target)} && git rev-parse --abbrev-ref HEAD 2>/dev/null`),
       runGit(`cd ${quote(target)} && git rev-parse --left-right --count HEAD...@{upstream} 2>/dev/null`),
-      runGit(`cd ${quote(target)} && git status --porcelain=v1 2>/dev/null`),
+      runGit(`cd ${quote(target)} && git status --porcelain=v1 --untracked-files=all 2>/dev/null`),
     ]);
 
     const entries: { path: string; origPath?: string; x: string; y: string; status: 'M' | 'A' | 'D' | 'U' | 'R' | 'C' }[] = [];
@@ -315,6 +316,7 @@ export class SshService implements Connector {
           filePart = filePart.substring(arrowIdx + 4);
         }
       }
+      if (isSmokePath(filePart) || isSmokePath(origPath)) continue;
       let status_code: 'M' | 'A' | 'D' | 'U' | 'R' | 'C';
       if (x === '?' && y === '?') status_code = 'U';
       else if (x === 'A' || y === 'A') status_code = 'A';
@@ -333,12 +335,19 @@ export class SshService implements Connector {
       if (!Number.isNaN(r)) behind = r;
     }
 
+    const total = entries.length;
+    const scope = opts?.limit != null;
+    const start = scope ? (opts.offset ?? 0) : 0;
+    const end = scope ? start + Math.max(opts.limit ?? 0, 1) : entries.length;
+    const page = scope ? entries.slice(start, end) : entries;
+
     return {
       isRepo: true,
       branch: bOut?.stdout ? bOut.stdout.trim() : undefined,
       ahead,
       behind,
-      entries,
+      total,
+      entries: page,
     };
   }
 

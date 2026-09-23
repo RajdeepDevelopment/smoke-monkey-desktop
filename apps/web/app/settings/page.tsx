@@ -27,7 +27,7 @@ import { useAuth } from '../../components/AuthProvider';
 import { PageScroll } from '../../components/PageScroll';
 import { PageHeader } from '../../components/PageHeader';
 import { StatusBadge } from '../../components/StatusBadge';
-import { BrandIconFor } from '../../components/BrandIconResolver';
+import { BrandIconFor, resolveBrand } from '../../components/BrandIconResolver';
 import { useToast } from '../../components/Toast';
 import { Switch } from '../../components/ui/switch';
 import { ModeSwitcher } from '../../components/workspace/ModeSwitcher';
@@ -407,8 +407,19 @@ function OmniRouteToggle() {
                       key={m.id}
                       className="flex items-center justify-between gap-3 rounded-md px-2 py-1 text-xs hover:bg-surface-800/60"
                     >
-                      <span className="min-w-0 truncate font-mono text-[11px] text-ink-primary">
-                        {m.id}
+                      <span className="flex min-w-0 items-center gap-2">
+                        {(() => {
+                          const { Icon: MIcon, color } = resolveBrand(m.id);
+                          return (
+                            <MIcon
+                              className={cn('h-3.5 w-3.5 shrink-0', color)}
+                              aria-hidden="true"
+                            />
+                          );
+                        })()}
+                        <span className="min-w-0 truncate font-mono text-[11px] text-ink-primary">
+                          {m.id}
+                        </span>
                       </span>
                       <span
                         className={cn(

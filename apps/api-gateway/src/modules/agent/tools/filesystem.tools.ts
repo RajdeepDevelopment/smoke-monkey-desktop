@@ -1142,12 +1142,34 @@ export function normalizeEditBlockPatch(raw: string): string {
   return out.join('\n');
 }
 
+/**
+ * Some models emit Claude-style hunks that use a bare `@@` separator WITH NO
+ * line-number header inside otherwise standard unified-diff headers:
+ *
+ *   --- a/backend/src/database/seed.ts
+ *   +++ b/backend/src/database/seed.ts
+ *   @@
+ *   -old line
+ *   +new line
+ *
+ * The unified-diff parser only recognizes numbered headers
+ * (`@@ -<start>,<count> +<start>,<count> @@`), so a bare `@@` yields ZERO
+ * parseable hunks and the tool errors out with "hunk did not match". Rewrite
+ * bare `@@` markers to `@@ -0,0 +0,0 @@` so the existing fuzzy context-anchor
+ * logic locates them (oldStart=0 ⇒ search the whole file, exactly like the
+ * edit-block converter). Only lines that are exactly `@@` are rewritten so
+ * real content containing `@@` is never touched.
+ */
+export function normalizeBareHunkHeaders(raw: string): string {
+  return raw.replace(/^@@\s*$/gm, '@@ -0,0 +0,0 @@');
+}
+
 export function getApplyPatchTool(): ToolDefinition {
   return {
     name: 'apply_patch',
     description:
       'Apply a unified diff patch to modify one or more files. Supports add (+), delete (-), and modify operations. ' +
-      'Also accepts Claude-style edit-block patches (*** Update File: ... / @@ ... @@). ' +
+      'Also accepts Claude-style edit-block patches (*** Update File: ... / @@ ... @@) and bare @@ hunk separators (no line numbers). ' +
       'Use this for multi-file changes. The patch format uses standard unified diff syntax.',
     inputSchema: {
       type: 'object',
@@ -1159,7 +1181,9 @@ export function getApplyPatchTool(): ToolDefinition {
             '--- a/path/to/file\n+++ b/path/to/file\n@@ -start,count +start,count @@\n' +
             ' context line\n-removed line\n+added line\n\n' +
             'For new files: use --- /dev/null and +++ b/path/to/file\n' +
-            'For deleted files: use --- a/path/to/file and +++ /dev/null',
+            'For deleted files: use --- a/path/to/file and +++ /dev/null\n\n' +
+            'Claude-style hunks are also accepted: a bare @@ line (no numbers) as the hunk separator, e.g.\n' +
+            '--- a/path/to/file\n+++ b/path/to/file\n@@\n context line\n-removed line\n+added line',
         },
       },
       required: ['patchText'],
@@ -1184,6 +1208,9 @@ export function getApplyPatchTool(): ToolDefinition {
       // Normalize them into standard unified diff before parsing so the rest of
       // this tool (hunk anchoring/verification) works unchanged for both forms.
       patchText = normalizeEditBlockPatch(patchText);
+      // Tolerate bare `@@` hunk separators (no line numbers) some models emit
+      // inside otherwise standard `---`/`+++` patch headers.
+      patchText = normalizeBareHunkHeaders(patchText);
 
       // Parse file sections. Models send both classic `--- a/x\n+++ b/x` and
       // git-style patches with a leading `diff --git` line; accept every shape
@@ -1295,6 +1322,14 @@ export function getApplyPatchTool(): ToolDefinition {
               newCount: hunkMatch[4] ? parseInt(hunkMatch[4]) : 1,
               body: bodyStr.split('\n'),
             });
+          }
+
+          // Headerless fallback: the body has 0/±/context lines but no numbered
+          // `@@` header (model emitted a self-contained diff with the file
+          // header only). Treat the whole remaining body as ONE context-anchored
+          // hunk (oldStart=0) so the fuzzy re-anchor machinery can locate it.
+          if (hunks.length === 0 && chunkBody.split('\n').some((l) => l.startsWith('-') || l.startsWith('+'))) {
+            hunks.push({ oldStart: 0, oldCount: 0, newStart: 0, newCount: 0, body: chunkBody.split('\n') });
           }
 
           let changesApplied = 0;

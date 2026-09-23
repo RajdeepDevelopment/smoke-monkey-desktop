@@ -73,8 +73,11 @@ export class WorkspaceController {
   // ── Git ──────────────────────────────────────────────────────────────────
 
   @Get('git/status')
-  async gitStatus(@Query('path') root: string) {
-    return this.workspace.gitStatus(root || process.cwd());
+  async gitStatus(@Query('path') root: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
+    const opts: { limit?: number; offset?: number } = {};
+    if (limit !== undefined) opts.limit = Math.max(1, parseInt(limit, 10) || 1);
+    if (offset !== undefined) opts.offset = Math.max(0, parseInt(offset, 10) || 0);
+    return this.workspace.gitStatus(root || process.cwd(), opts);
   }
 
   @Get('git/diff-file')
@@ -84,8 +87,8 @@ export class WorkspaceController {
   }
 
   @Post('git/stage')
-  async gitStage(@Body() body: { cwd: string; files: string[]; unstage?: boolean }) {
-    await this.workspace.gitStage(body.cwd, body.files || [], !!body.unstage);
+  async gitStage(@Body() body: { cwd: string; files: string[]; unstage?: boolean; all?: boolean }) {
+    await this.workspace.gitStage(body.cwd, body.files || [], !!body.unstage, !!body.all);
     return { status: 'ok' };
   }
 
@@ -93,6 +96,73 @@ export class WorkspaceController {
   async gitDiscard(@Body() body: { cwd: string; file: string; untracked?: boolean }) {
     await this.workspace.gitDiscard(body.cwd, body.file, !!body.untracked);
     return { status: 'ok' };
+  }
+
+  // ── Git operations (source-control sidebar) ─────────────────────────────
+
+  @Post('git/init')
+  async gitInit(@Body() body: { cwd: string }) {
+    return this.workspace.gitInit(body.cwd || process.cwd());
+  }
+
+  @Post('git/commit')
+  async gitCommit(@Body() body: { cwd: string; message: string; stageAll?: boolean }) {
+    return this.workspace.gitCommit(body.cwd || process.cwd(), body.message || '', !!body.stageAll);
+  }
+
+  @Post('git/fetch')
+  async gitFetch(@Body() body: { cwd: string }) {
+    return this.workspace.gitFetch(body.cwd || process.cwd());
+  }
+
+  @Post('git/pull')
+  async gitPull(@Body() body: { cwd: string }) {
+    return this.workspace.gitPull(body.cwd || process.cwd());
+  }
+
+  @Post('git/push')
+  async gitPush(@Body() body: { cwd: string; setUpstream?: boolean }) {
+    return this.workspace.gitPush(body.cwd || process.cwd(), !!body.setUpstream);
+  }
+
+  @Get('git/stashes')
+  async gitStashes(@Query('path') root: string) {
+    return { stashes: await this.workspace.gitStashList(root || process.cwd()) };
+  }
+
+  @Post('git/stash/push')
+  async gitStashPush(@Body() body: { cwd: string; message?: string }) {
+    return this.workspace.gitStashPush(body.cwd || process.cwd(), body.message);
+  }
+
+  @Post('git/stash/apply')
+  async gitStashApply(@Body() body: { cwd: string; name?: string }) {
+    return this.workspace.gitStashApply(body.cwd || process.cwd(), body.name);
+  }
+
+  @Post('git/stash/pop')
+  async gitStashPop(@Body() body: { cwd: string; name?: string }) {
+    return this.workspace.gitStashPop(body.cwd || process.cwd(), body.name);
+  }
+
+  @Post('git/stash/drop')
+  async gitStashDrop(@Body() body: { cwd: string; name: string }) {
+    return this.workspace.gitStashDrop(body.cwd || process.cwd(), body.name);
+  }
+
+  @Get('git/branches')
+  async gitBranches(@Query('path') root: string) {
+    return { branches: await this.workspace.gitBranches(root || process.cwd()) };
+  }
+
+  @Post('git/branch/create')
+  async gitCreateBranch(@Body() body: { cwd: string; name: string }) {
+    return this.workspace.gitCreateBranch(body.cwd || process.cwd(), body.name);
+  }
+
+  @Post('git/branch/switch')
+  async gitSwitchBranch(@Body() body: { cwd: string; name: string }) {
+    return this.workspace.gitSwitchBranch(body.cwd || process.cwd(), body.name);
   }
 
   // ── Search ───────────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import { Sidebar } from './Sidebar';
 import { MobileNav } from './MobileNav';
 import { MobileBottomNav } from './MobileNavigation';
 import { OnboardingWizard } from './onboarding/OnboardingWizard';
+import { BootLoader } from './BootLoader';
 import { initExternalLinkHandling } from '../lib/external-links';
 
 export const TITLES: Record<string, string> = {
@@ -18,7 +19,6 @@ export const TITLES: Record<string, string> = {
   '/documents': 'Knowledge Base',
   '/models': 'Models',
   '/mcp': 'MCP Servers',
-  '/playground': 'Playground',
   '/analytics': 'Analytics',
   '/settings': 'Settings',
   '/login': 'Sign in',
@@ -58,11 +58,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [loading, user, isAuthPage, router]);
 
   if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-bg">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
-      </div>
-    );
+    return <BootLoader />;
   }
 
   // Auth pages get a clean, centered layout — no app chrome.

@@ -21,6 +21,8 @@ interface AuthContextValue {
 
 const ONBOARDING_TAG = 'sm_onboarding_dismissed';
 
+const onboardingTag = (userId: string) => `${ONBOARDING_TAG}:${userId}`;
+
 const AuthContext = createContext<AuthContextValue>({
   user: null,
   loading: true,
@@ -43,8 +45,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .me()
         .then((res) => setUser(res.user))
         .catch(() => {
-          setToken(null);
-          setUser(null);
+          // Only tear down the session we were re-validating. If login/register
+          // already swapped in a newer token meanwhile, don't clobber it.
+          if (getToken() === token) {
+            setToken(null);
+            setUser(null);
+          }
         })
         .finally(() => setLoading(false));
     if (!token) {
@@ -60,9 +66,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // After the user is known, decide whether the onboarding wizard should show.
+  // The dismissal tag is scoped per user id so a fresh account is never blocked
+  // by onboarding state left behind by a previous account on the same device.
   useEffect(() => {
     if (loading || !user) return;
-    if (localStorage.getItem(ONBOARDING_TAG) === '1') return;
+    if (localStorage.getItem(onboardingTag(user.id)) === '1') return;
     api
       .fetchOnboarding()
       .then((res) => setNeedsOnboarding(!res.completed))
@@ -72,26 +80,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login = useCallback(async (email: string, password: string) => {
     const res = await api.login(email, password);
     setToken(res.accessToken);
+    setNeedsOnboarding(false);
     setUser(res.user);
   }, []);
 
   const register = useCallback(async (email: string, name: string, password: string) => {
     const res = await api.register(email, name, password);
     setToken(res.accessToken);
+    setNeedsOnboarding(false);
     setUser(res.user);
   }, []);
 
   const logout = useCallback(() => {
     api.logout().catch(() => undefined);
+    if (user) localStorage.removeItem(onboardingTag(user.id));
     setToken(null);
     setUser(null);
     setNeedsOnboarding(false);
-  }, []);
+  }, [user]);
 
   const dismissOnboarding = useCallback(() => {
-    localStorage.setItem(ONBOARDING_TAG, '1');
+    if (!user) return;
+    localStorage.setItem(onboardingTag(user.id), '1');
     setNeedsOnboarding(false);
-  }, []);
+  }, [user]);
 
   return (
     <AuthContext.Provider

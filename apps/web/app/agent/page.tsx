@@ -3,11 +3,13 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import {
-  Plus, FolderDown, Code2, X, Cpu,
+  FolderOpen, Hammer, Compass, ListChecks, X, Cpu, TriangleAlert,
 } from 'lucide-react';
 import type { AgentSession } from '../../lib/agent-api';
 import { agentApi } from '../../lib/agent-api';
+import { stopRun as sessionStopRun } from '../../lib/agent-session-store';
 import { AgentChat } from '../../components/agent/AgentChat';
+import { BrandIcon } from '../../components/BrandIcon';
 import { AgentAppShell } from '../../components/workspace/AgentAppShell';
 import type { RemoteConnectionState } from '../../components/workspace/StatusBar';
 import { SidePanelContent } from '../../components/workspace/SidePanelContent';
@@ -207,7 +209,9 @@ export default function AgentPage() {
       setLoading(true);
       const list = await agentApi.listSessions();
       setSessions(list);
-      setActiveSession((prev) => prev ?? list[0] ?? null);
+      const requested = new URLSearchParams(window.location.search).get('s');
+      const fromLink = requested ? list.find((s) => s.id === requested) : undefined;
+      setActiveSession((prev) => fromLink ?? (fromLink ? undefined : prev) ?? list[0] ?? null);
     } catch { /* ignore */ } finally {
       setLoading(false);
     }
@@ -220,40 +224,108 @@ export default function AgentPage() {
       });
       const data = await res.json();
       setProviders(data.providers || []);
+      // Deep-link support: the Models page hands off with ?provider&model so
+      // the picked model is pre-selected here. Clean the URL so a refresh or
+      // re-navigation never re-applies the stale link.
+      const q = new URLSearchParams(window.location.search);
+      const linkProvider = q.get('provider');
+      const linkModel = q.get('model');
+      if (linkProvider && linkProvider !== '') {
+        setSelectedProvider(linkProvider);
+        if (linkModel && linkModel !== '') setSelectedModel(linkModel);
+        q.delete('provider');
+        q.delete('model');
+        const next = q.toString();
+        window.history.replaceState(null, '', `${next ? `?${next}` : ''}${window.location.hash}`);
+      }
     } catch { /* ignore */ }
   }
 
+  // Stale-response guards: fast folder switches can leave an in-flight request
+  // from the previous workspace resolving after the new one, overwriting fresh
+  // file tree / git status with old data. Monotonic counters discard any
+  // response that is no longer the latest request.
+  const fileTreeReqRef = useRef(0);
+  const gitStatusReqRef = useRef(0);
+
+  // Lazily-loaded git status: SCM fetches the first page, then more on scroll.
+  const GIT_STATUS_PAGE_SIZE = 200;
+  const gitStatusRef = useRef<Awaited<ReturnType<typeof ideApi.gitStatus>> | null>(null);
+  const gitMoreLoadingRef = useRef(false);
+  const [gitMoreLoading, setGitMoreLoading] = useState(false);
+  const [gitHasMore, setGitHasMore] = useState(false);
+  gitStatusRef.current = gitStatus;
+
   const loadFileTree = useCallback(async (root: string, depth = 1) => {
     if (!root) return;
+    const req = ++fileTreeReqRef.current;
     try {
       setFileTreeLoading(true);
       // Shallow by default: the FileExplorer lazy-loads each directory on expand,
       // so fetching a deep tree here means dozens of serialized SSH round-trips
       // on connect (the old depth-3 remote tree could hang the UI).
       const tree = await client.fileTree(root, depth);
+      if (req !== fileTreeReqRef.current) return;
       setFileTree(tree);
     } catch {
+      if (req !== fileTreeReqRef.current) return;
       setFileTree([]);
     } finally {
-      setFileTreeLoading(false);
+      if (req === fileTreeReqRef.current) setFileTreeLoading(false);
     }
   }, [client]);
 
-  const loadGitStatus = useCallback(async (root: string) => {
+  const loadGitStatus = useCallback(async (root: string, _initial = true) => {
     if (!root) return;
+    const req = ++gitStatusReqRef.current;
     try {
       setGitLoading(true);
-      setGitStatus(await client.gitStatus(root));
+      const status = await client.gitStatus(root, { limit: GIT_STATUS_PAGE_SIZE, offset: 0 });
+      if (req !== gitStatusReqRef.current) return;
+      setGitStatus(status);
+      setGitHasMore((status.total ?? status.entries.length) > status.entries.length);
     } catch {
+      if (req !== gitStatusReqRef.current) return;
       setGitStatus(null);
+      setGitHasMore(false);
     } finally {
-      setGitLoading(false);
+      if (req === gitStatusReqRef.current) setGitLoading(false);
     }
-  }, [client]);
+  }, [client, GIT_STATUS_PAGE_SIZE]);
+
+  const loadMoreGitStatus = useCallback(async () => {
+    if (gitMoreLoadingRef.current) return;
+    const cur = gitStatusRef.current;
+    const root = workspacePathRef.current;
+    if (!root || !cur || !cur.isRepo) return;
+    const loaded = cur.entries.length;
+    const total = cur.total ?? loaded;
+    if (loaded >= total) return;
+    // Capture the current full-load request number so a mid-flight refresh cancels us.
+    const req = gitStatusReqRef.current;
+    gitMoreLoadingRef.current = true;
+    setGitMoreLoading(true);
+    try {
+      const more = await client.gitStatus(root, { limit: GIT_STATUS_PAGE_SIZE, offset: loaded });
+      // Discard if a workspace switch or refresh happened while we fetched.
+      if (req !== gitStatusReqRef.current) return;
+      setGitStatus((prev) => {
+        if (!prev || !prev.isRepo) return prev;
+        return { ...prev, entries: [...prev.entries, ...more.entries], total: more.total ?? prev.total };
+      });
+      setGitHasMore((more.total ?? total) > loaded + more.entries.length);
+    } catch { /* keep current data */ }
+    finally {
+      gitMoreLoadingRef.current = false;
+      if (req === gitStatusReqRef.current) setGitMoreLoading(false);
+    }
+  }, [client, GIT_STATUS_PAGE_SIZE]);
 
   // Workspace switch → reload everything
   useEffect(() => {
     if (!workspacePath) return;
+    setGitStatus(null);
+    setFileTree([]);
     loadFileTree(workspacePath);
     loadGitStatus(workspacePath);
   }, [workspacePath, loadFileTree, loadGitStatus]);
@@ -606,48 +678,102 @@ export default function AgentPage() {
   // Empty state — no sessions yet
   if (!activeSession) {
     return (
-      <div className="flex h-screen items-center justify-center workspace-bg">
-        <div className="text-center space-y-4 max-w-sm">
-          <div className="mx-auto h-12 w-12 rounded-xl glass-panel flex items-center justify-center">
-            <Code2 className="h-6 w-6 text-ink-muted/50" />
-          </div>
-          <div>
-            <h2 className="text-base font-medium text-foreground/80">Smoke Monkey Agent</h2>
-            <p className="text-xs text-ink-muted/60 mt-1">Set a workspace and start building.</p>
+      <div className="relative flex h-screen items-center justify-center overflow-hidden bg-bg">
+        {/* Magic UI aurora + dot grid backdrop */}
+        <div className="pointer-events-none absolute inset-0">
+          <div className="absolute -top-24 left-1/2 h-72 w-[40rem] -translate-x-1/2 rounded-full bg-primary/20 blur-[120px]" />
+          <div className="absolute bottom-[-5rem] left-[-6rem] h-64 w-64 rounded-full bg-accent/10 blur-[100px]" />
+          <div className="absolute right-[-5rem] top-1/3 h-64 w-64 rounded-full bg-primary-deep/15 blur-[110px]" />
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_1px_1px,hsl(var(--border)/0.10)_1px,transparent_0)] bg-[size:44px_44px] opacity-40 [mask-image:radial-gradient(ellipse_at_center,black_30%,transparent_75%)]" />
+        </div>
+
+        <div className="relative w-full max-w-md animate-fade-up px-5">
+          {/* Glowing logo medallion */}
+          <div className="relative mx-auto mb-7 flex h-24 w-24 items-center justify-center">
+            <span className="absolute inset-0 rounded-2xl bg-primary/25 blur-2xl" />
+            <span className="absolute inset-0 rounded-2xl border border-primary/30 bg-primary-subtle shadow-glow-strong" />
+            <span className="absolute -inset-2.5 rounded-full border border-primary/10 animate-pulse-soft" />
+            <BrandIcon size={84} className="relative drop-shadow-[0_0_16px_rgba(139,92,246,0.55)]" />
           </div>
 
-          <div className="mx-auto max-w-xs space-y-1.5">
-            <div className="flex items-center gap-2 rounded-lg glass-panel px-3 py-2">
-              <FolderDown className="h-3.5 w-3.5 text-ink-muted shrink-0" />
-              <input value={workspacePath} onChange={(e) => setWorkspacePath(e.target.value)}
-                placeholder="/path/to/your/project"
-                className="flex-1 bg-transparent text-xs outline-none placeholder:text-ink-muted" />
-              <button onClick={async () => {
-                const folder = await openFolderPicker();
-                if (folder) setWorkspacePath(folder);
-              }} className="px-2 py-0.5 text-[10px] font-medium rounded glass-panel glass-hover text-foreground transition-colors">
-                Browse
-              </button>
+          {/* Title block */}
+          <div className="mb-7 text-center">
+            <h1 className="bg-gradient-to-br from-white via-white to-primary-hover bg-clip-text text-[24px] font-semibold tracking-tight text-transparent">
+              Smoke Monkey Agent
+            </h1>
+            <p className="mx-auto mt-2 max-w-xs text-sm leading-relaxed text-ink-muted">
+              Set a workspace and start building.
+            </p>
+          </div>
+
+          {/* Workspace setup card */}
+          <div className="relative overflow-hidden rounded-2xl border border-border/80 bg-card/60 shadow-panel backdrop-blur-xl">
+            <span className="pointer-events-none absolute inset-x-0 -top-24 h-40 bg-primary-glow" />
+            <span className="pointer-events-none absolute inset-x-8 top-0 h-px bg-gradient-to-r from-transparent via-primary/60 to-transparent" />
+
+            <div className="relative p-5">
+              {/* Folder picker */}
+              <div className="flex h-11 items-center gap-2 rounded-xl border border-border/80 bg-surface-950/70 pl-3.5 transition-all focus-within:border-primary/40 focus-within:shadow-focus-ring">
+                <FolderOpen className="h-4 w-4 shrink-0 text-ink-muted" />
+                <input
+                  value={workspacePath}
+                  onChange={(e) => setWorkspacePath(e.target.value)}
+                  placeholder="/path/to/your/project"
+                  className="h-full flex-1 bg-transparent text-sm text-ink-primary outline-none placeholder:text-ink-muted"
+                />
+                <button
+                  onClick={async () => {
+                    const folder = await openFolderPicker();
+                    if (folder) setWorkspacePath(folder);
+                  }}
+                  className="mr-1.5 inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-primary/25 bg-primary-subtle px-3 text-xs font-medium text-primary-hover transition-colors hover:border-primary/50 hover:bg-primary/20"
+                >
+                  <FolderOpen className="h-3.5 w-3.5" /> Browse
+                </button>
+              </div>
+
+              {/* Agent modes */}
+              <div className="mt-4 grid grid-cols-3 gap-2.5">
+                <button
+                  onClick={() => handleNewSession('build')}
+                  disabled={loading || !workspacePath}
+                  className="group relative overflow-hidden rounded-xl bg-gradient-to-br from-primary via-primary-hover to-primary-deep px-2 py-4 text-left shadow-glow transition-all duration-200 hover:-translate-y-0.5 hover:shadow-glow-strong disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0 disabled:hover:shadow-glow"
+                >
+                  <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/50 to-transparent" />
+                  <Hammer className="h-4 w-4 text-white" />
+                  <span className="mt-2 block text-xs font-semibold text-white">Build</span>
+                  <span className="mt-0.5 block text-[10px] leading-snug text-white/70">Implement &amp; fix features</span>
+                </button>
+
+                <button
+                  onClick={() => handleNewSession('explore')}
+                  disabled={loading || !workspacePath}
+                  className="group rounded-xl border border-border/80 bg-surface-900/60 px-2 py-4 text-left backdrop-blur-md transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/40 hover:bg-surface-850/70 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0"
+                >
+                  <Compass className="h-4 w-4 text-ink-muted transition-colors group-hover:text-primary-hover" />
+                  <span className="mt-2 block text-xs font-semibold text-ink-primary">Explore</span>
+                  <span className="mt-0.5 block text-[10px] leading-snug text-ink-muted">Understand the codebase</span>
+                </button>
+
+                <button
+                  onClick={() => handleNewSession('plan')}
+                  disabled={loading || !workspacePath}
+                  className="group rounded-xl border border-border/80 bg-surface-900/60 px-2 py-4 text-left backdrop-blur-md transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/40 hover:bg-surface-850/70 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:translate-y-0"
+                >
+                  <ListChecks className="h-4 w-4 text-ink-muted transition-colors group-hover:text-primary-hover" />
+                  <span className="mt-2 block text-xs font-semibold text-ink-primary">Plan</span>
+                  <span className="mt-0.5 block text-[10px] leading-snug text-ink-muted">Architect the next step</span>
+                </button>
+              </div>
+
+              {!workspacePath && (
+                <p className="mt-4 flex items-center justify-center gap-1.5 text-[11.5px] text-warning/90">
+                  <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
+                  Choose a folder first — the agent can&apos;t run without a workspace path.
+                </p>
+              )}
             </div>
           </div>
-
-          <div className="flex justify-center gap-2">
-            <button onClick={() => handleNewSession('build')} disabled={loading || !workspacePath}
-              className="flex items-center gap-1 rounded-lg bg-primary px-3 py-2 text-xs text-primary-foreground hover:bg-primary-hover transition-colors disabled:cursor-not-allowed disabled:opacity-40">
-              <Plus className="h-3 w-3" /> Build
-            </button>
-            <button onClick={() => handleNewSession('explore')} disabled={loading || !workspacePath}
-              className="flex items-center gap-1 rounded-lg glass-panel px-3 py-2 text-xs text-ink-muted glass-hover transition-colors disabled:cursor-not-allowed disabled:opacity-40">
-              <Plus className="h-3 w-3" /> Explore
-            </button>
-            <button onClick={() => handleNewSession('plan')} disabled={loading || !workspacePath}
-              className="flex items-center gap-1 rounded-lg glass-panel px-3 py-2 text-xs text-ink-muted glass-hover transition-colors disabled:cursor-not-allowed disabled:opacity-40">
-              <Plus className="h-3 w-3" /> Plan
-            </button>
-          </div>
-          {!workspacePath && (
-            <p className="text-[11px] text-warning">Choose a folder first — the agent can't run without a workspace path.</p>
-          )}
         </div>
       </div>
     );
@@ -671,7 +797,7 @@ export default function AgentPage() {
             setConflicts({});
           }
         }}
-        gitChangeCount={gitStatus?.entries.length ?? 0}
+        gitChangeCount={gitStatus?.total ?? gitStatus?.entries.length ?? 0}
         remote={remoteConnection}
         onRemoteChange={(id) => {
           const profile = id ? sshProfiles.find((p) => p.id === id) ?? null : null;
@@ -711,7 +837,7 @@ export default function AgentPage() {
               </select>
             </div>
             {isRunning && (
-              <button onClick={() => agentApi.interrupt(activeSession.id).then(() => setIsRunning(false))}
+              <button onClick={() => sessionStopRun(activeSession.id).then(() => setIsRunning(false))}
                 className="flex items-center gap-1 rounded bg-red-600/90 px-2 py-0.5 text-[10px] text-white hover:bg-red-700 transition-colors">
                 <X className="h-2.5 w-2.5" /> Stop
               </button>
@@ -743,6 +869,9 @@ export default function AgentPage() {
               if (folder) setWorkspacePath(folder);
             }}
             onRefreshGit={() => loadGitStatus(workspacePath)}
+            onLoadMoreGit={loadMoreGitStatus}
+            gitMoreLoading={gitMoreLoading}
+            gitHasMore={gitHasMore}
             onSearchResultOpen={handleFileSelect}
             onOpenGitDiff={handleOpenGitDiff}
             onModelChange={setSelectedModel}
@@ -816,7 +945,17 @@ export default function AgentPage() {
         filePreview={
           previewFile
             ? { file: previewFile, onClose: () => closeFile(activeFileIndex) }
-            : null
+            : gitDiff
+              ? {
+                  file: {
+                    path: gitDiff.relPath,
+                    name: getFileName(gitDiff.relPath),
+                    content: gitDiff.current,
+                    kind: 'code',
+                  },
+                  onClose: () => setGitDiff(null),
+                }
+              : null
         }
       />
       <QuickOpen

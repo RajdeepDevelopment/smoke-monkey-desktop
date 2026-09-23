@@ -41,6 +41,11 @@ interface ChatComposerProps {
   model: string;
   defaultProvider?: string;
   presets?: ModelPreset[];
+  /** Per-model health flags (from the OmniRoute 30-min inspection) keyed by model id. */
+  modelInfo?: Record<
+    string,
+    { available?: boolean; latencyMs?: number | null; keyRequired?: boolean; isFree?: boolean }
+  >;
   onModelChange: (provider: string, model: string) => void;
   onAttach: (file: File) => void;
   placeholder?: string;
@@ -292,6 +297,7 @@ export function ChatComposer({
   model,
   defaultProvider,
   presets,
+  modelInfo,
   onModelChange,
   onAttach,
   placeholder,
@@ -521,6 +527,7 @@ export function ChatComposer({
               model={model}
               defaultProvider={defaultProvider}
               presets={presets}
+              modelInfo={modelInfo}
               onChange={onModelChange}
               compact
             />
