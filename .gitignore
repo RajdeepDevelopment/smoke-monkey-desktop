@@ -70,6 +70,14 @@ server/agent-skills/
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/WixTools/
 apps/desktop/src-tauri/Frameworks/
+# Only the desktop-bundle icons (see tauri.conf.json bundle.icon) are tracked:
+# 32x32.png, 128x128.png, 128x128@2x.png, icon.icns, icon.ico, icon.png.
+# Everything else tauri icon generates (iOS / Android / Store logos) is unused.
+apps/desktop/src-tauri/icons/ios/
+apps/desktop/src-tauri/icons/android/
+apps/desktop/src-tauri/icons/Square*.png
+apps/desktop/src-tauri/icons/StoreLogo.png
+apps/desktop/src-tauri/icons/64x64.png
 
 # ── User data (contains profile.json with password hashes) ───────────────────
 data/desktop/
