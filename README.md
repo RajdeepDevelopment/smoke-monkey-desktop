@@ -13,6 +13,10 @@ citations.
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-4B0082?style=for-the-badge)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=for-the-badge)](CONTRIBUTING.md)
 
+<p align="center">
+  <img src="smokeMonkeyLogo.png" alt="Smoke Monkey Desktop logo" width="220" />
+</p>
+
 ---
 
 ![Next.js](https://img.shields.io/badge/Next.js-000000?style=for-the-badge&logo=nextdotjs&logoColor=white)
