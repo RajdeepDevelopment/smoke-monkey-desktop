@@ -8,7 +8,7 @@ import {
 import { ideApi } from '../../lib/ide-api';
 import { getFileViewerType, isEditableViewer } from '../../lib/file-types';
 import { cn } from '../../lib/utils';
-import { agentAssetToBlob, downloadAgentAsset, fetchAgentAsset } from '../../lib/api';
+import { agentAssetToBlob, downloadAgentAsset, fetchAgentAsset, probeAgentAsset } from '../../lib/api';
 
 /**
  * The backend instructs the agent to wrap every generated file path in this
@@ -315,6 +315,20 @@ export const FileCard = memo(function FileCard({ path, onOpenInEditor }: FileCar
   const isVideo = VIDEO_EXTS.has(fileExt(path));
   const isAudio = AUDIO_EXTS.has(fileExt(path));
 
+  // ── Existence probe ──────────────────────────────────────────────────────
+  // Prevents showing a full action card (Download / Open / Reveal) for a
+  // hallucinated path that was never actually written to disk. The backend
+  // sanitiser strips markers before persist when possible, but some older
+  // messages may already have bogus paths — this catches them client-side.
+  const [exists, setExists] = useState<'checking' | 'found' | 'missing'>('checking');
+  useEffect(() => {
+    let cancelled = false;
+    probeAgentAsset(path)
+      .then(() => { if (!cancelled) setExists('found'); })
+      .catch(() => { if (!cancelled) setExists('missing'); });
+    return () => { cancelled = true; };
+  }, [path]);
+
   const runDownload = () =>
     download.run(async () => {
       downloadAgentAsset(await fetchAgentAsset(path));
@@ -333,6 +347,47 @@ export const FileCard = memo(function FileCard({ path, onOpenInEditor }: FileCar
       }
     });
 
+  // ── Degraded state: file not found ───────────────────────────────────────
+  if (exists === 'missing') {
+    return (
+      <div className="addon-shell relative mx-0 my-2.5 overflow-hidden rounded-lg border border-amber-500/30 bg-amber-950/20">
+        <div className="flex items-center gap-3 px-3 py-2.5">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-amber-400 bg-amber-500/10">
+            <AlertTriangle className="h-[18px] w-[18px]" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[12.5px] font-medium text-amber-200" title={path}>
+              {name}
+            </p>
+            <p className="truncate text-[10.5px] text-amber-300/70" title={path}>
+              ⚠ File not found — the reported path does not exist on disk.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Checking state: lightweight spinner ───────────────────────────────────
+  if (exists === 'checking') {
+    return (
+      <div className="addon-shell relative mx-0 my-2.5 overflow-hidden rounded-lg border border-surface-600 bg-surface-900">
+        <div className="flex items-center gap-3 px-3 py-2.5">
+          <div className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-md', meta.chip)}>
+            <Icon className="h-[18px] w-[18px]" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[12.5px] font-medium text-foreground" title={path}>{name}</p>
+            <p className="flex items-center gap-1.5 text-[10.5px] text-ink-muted">
+              <Loader2 className="h-3 w-3 animate-spin" /> Checking file…
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Full card: file exists ────────────────────────────────────────────────
   return (
     <div className="addon-shell relative mx-0 my-2.5 overflow-hidden rounded-lg border border-surface-600 bg-surface-900">
       {isImage && <FileImagePreview path={path} />}

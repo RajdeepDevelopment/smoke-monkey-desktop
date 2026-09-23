@@ -10,6 +10,7 @@ export const PROVIDER_TAVILY = 'tavily';
 export const PROVIDER_GOOGLE = 'google';
 export const PROVIDER_BRAVE = 'brave';
 export const PROVIDER_BING = 'bing';
+export const PROVIDER_OMNIROUTE = 'omniroute';
 
 export enum ApiKeyProvider {
   OpenRouter = 'openrouter',
@@ -22,6 +23,7 @@ export enum ApiKeyProvider {
   Google = 'google',
   Brave = 'brave',
   Bing = 'bing',
+  Omniroute = 'omniroute',
 }
 
 export const SUPPORTED_PROVIDERS = Object.values(ApiKeyProvider) as readonly string[];

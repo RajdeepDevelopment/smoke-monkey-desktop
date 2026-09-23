@@ -15,6 +15,7 @@ import {
   PROVIDER_GEMINI,
   PROVIDER_GOOGLE,
   PROVIDER_NVIDIA,
+  PROVIDER_OMNIROUTE,
   PROVIDER_OPENAI,
   PROVIDER_OPENCODE,
   PROVIDER_OPENROUTER,
@@ -30,6 +31,7 @@ const OPENAI_MODELS_URL = 'https://api.openai.com/v1/models';
 const XAI_MODELS_URL = 'https://api.x.ai/v1/models';
 const GEMINI_MODELS_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
 const OPENCODE_MODELS_URL = 'https://opencode.ai/zen/v1/models';
+const OMNIROUTE_MODELS_URL = 'http://localhost:20128/v1/models';
 
 export interface UserKeySummary {
   provider: string;
@@ -208,6 +210,14 @@ export class ApiKeysService {
         'invalid Bing key — it is a 32-character string. Get one at azure.microsoft.com',
       );
     }
+    if (provider === PROVIDER_OMNIROUTE) {
+      // OmniRoute gateway keys (created in its "API Key / Endpoints" page).
+      if (apiKey.length < 16) {
+        throw new BadRequestException(
+          'invalid OmniRoute key — it is too short. Create one at http://localhost:20128 → API Key / Endpoints',
+        );
+      }
+    }
   }
 
   /**
@@ -235,6 +245,9 @@ export class ApiKeysService {
     }
     if (provider === PROVIDER_OPENCODE) {
       return this.validateOpenAiCompatKey(OPENCODE_MODELS_URL, apiKey, 'OpenCode Zen');
+    }
+    if (provider === PROVIDER_OMNIROUTE) {
+      return this.validateOpenAiCompatKey(OMNIROUTE_MODELS_URL, apiKey, 'OmniRoute');
     }
     return null;
   }

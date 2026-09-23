@@ -265,11 +265,14 @@
 
 @layer components {
   // ── Markdown body (assistant answers) ────────────────────────
+  // Premium token styling tuned for the near-black surface (#080B12):
+  // each element carries its own accent so long answers stay scannable.
   .md-body {
-    @apply text-[15px] leading-relaxed text-ink-primary;
+    @apply text-[14px] leading-[1.6] text-ink-primary;
     min-width: 0;
     overflow-wrap: break-word;
     word-break: break-word;
+    font-feature-settings: 'kern', 'liga', 'calt';
   }
   .md-body > *:first-child {
     @apply mt-0;
@@ -278,74 +281,446 @@
     @apply mb-0;
   }
   .md-body p {
-    @apply my-3;
+    @apply my-2;
   }
+
+  // ── Headings — one accent per level, all legible on the black bg.
+  //  Google-Docs style size ladder so hierarchy reads even when skimming.
   .md-body h1,
   .md-body h2,
   .md-body h3,
-  .md-body h4 {
-    @apply mb-2 mt-5 font-semibold text-white first:mt-0;
+  .md-body h4,
+  .md-body h5,
+  .md-body h6 {
+    @apply mb-1.5 mt-4 font-semibold first:mt-0;
+    letter-spacing: -0.015em;
+    scroll-margin-top: 4rem;
+    text-wrap: balance;
   }
   .md-body h1 {
-    @apply text-xl;
+    @apply text-[24px] font-bold leading-[1.15] tracking-tight text-white;
+    position: relative;
+    padding-bottom: 0.15rem;
+  }
+  .md-body h1::after {
+    content: '';
+    display: block;
+    width: 48px;
+    height: 2.5px;
+    margin-top: 0.4rem;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #fbbf24, #fde047);
+    box-shadow: 0 0 12px rgba(251, 191, 36, 0.4);
   }
   .md-body h2 {
-    @apply text-lg;
+    @apply text-[19px] font-bold leading-[1.25] text-[#fbbf24];
+    border-left: 3px solid transparent;
+    padding-left: 0.6rem;
+    border-image: linear-gradient(180deg, #fbbf24, #fde047) 1;
   }
   .md-body h3 {
-    @apply text-base;
+    @apply text-[16px] leading-[1.3] text-accent;
   }
+  .md-body h4 {
+    @apply text-[15px] leading-[1.35] text-[#38bdf8];
+  }
+  .md-body h5 {
+    @apply text-[13.5px] leading-[1.4] text-[#34d399];
+  }
+  .md-body h6 {
+    @apply text-[12px] font-medium uppercase leading-[1.4] tracking-widest text-ink-muted;
+  }
+
+  // ── Lists — gradient bullets (ul) / accent numbers (ol) ──────
   .md-body ul {
-    @apply my-3 list-disc space-y-1 pl-6;
+    @apply my-2 list-none space-y-1 pl-6;
+  }
+  .md-body ul > li {
+    @apply relative;
+  }
+  .md-body ul > li::before {
+    content: '';
+    position: absolute;
+    left: -1.05rem;
+    top: 0.58em;
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: linear-gradient(135deg, #fbbf24, 55%, #fde047);
+    box-shadow: 0 0 7px rgba(251, 191, 36, 0.55);
+  }
+  .md-body li ul > li::before {
+    width: 5px;
+    height: 5px;
+    top: 0.6em;
+    background: transparent;
+    border: 1px solid rgba(56, 189, 248, 0.65);
+    box-shadow: none;
   }
   .md-body ol {
-    @apply my-3 list-decimal space-y-1 pl-6;
+    @apply my-2 list-decimal space-y-1 pl-7;
+    counter-reset: none;
+  }
+  .md-body ol > li::marker {
+    @apply font-semibold;
+    color: hsl(var(--accent));
   }
   .md-body li {
-    @apply my-1;
+    @apply my-0.5;
   }
-  .md-body li::marker {
-    @apply text-ink-muted;
+
+  // ── Task lists (GFM checkboxes) ──────────────────────────────
+  .md-body ul.contains-task-list {
+    @apply list-none space-y-2 pl-0;
   }
+  .md-body ul.contains-task-list > li::before {
+    content: none;
+  }
+  .md-body li.task-list-item {
+    @apply flex items-start gap-2.5;
+  }
+  .md-body li.task-list-item input[type='checkbox'] {
+    @apply mt-0.5 h-4 w-4 shrink-0 cursor-default rounded;
+    accent-color: hsl(var(--accent));
+  }
+
+  // ── Links / inline code ──────────────────────────────────────
   .md-body a {
-    @apply text-accent underline decoration-accent/40 underline-offset-2 transition-colors hover:text-accent-hover;
+    @apply text-accent underline decoration-accent/40 underline-offset-4 transition-[color,text-decoration-color] hover:text-amber-300 hover:decoration-amber-300/50;
   }
   .md-body code:not(pre code) {
-    @apply rounded-md bg-surface-800 px-1.5 py-0.5 font-mono text-[0.85em] text-accent;
+    @apply rounded-md border border-white/10 bg-surface-800 px-1.5 py-0.5 font-mono text-[0.85em] text-accent;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    overflow-wrap: break-word;
   }
-  .md-body pre {
-    @apply my-4 overflow-x-auto rounded-xl border border-border bg-surface-950 p-4;
+  .md-body em {
+    color: #fde68a; // amber emphasis, still on-dark safe
   }
-  .md-body pre code {
-    @apply bg-transparent p-0 font-mono text-[13px] leading-relaxed text-slate-200;
-  }
-  .md-body blockquote {
-    @apply my-4 border-l-2 border-primary/40 pl-4 text-ink-secondary;
-  }
-  .md-body table {
-    @apply my-4 w-full border-collapse overflow-hidden rounded-lg text-sm;
-  }
-  .md-body th {
-    @apply border border-border bg-surface-850 px-3 py-2 text-left font-medium text-ink-primary;
-  }
-  .md-body td {
-    @apply border border-border px-3 py-2 text-ink-secondary;
-  }
-  .md-body hr {
-    @apply my-6 border-border;
+  .md-body del {
+    @apply text-ink-muted;
   }
   .md-body strong {
     @apply font-semibold text-white;
   }
+
+  // ── Code blocks — chrome lives in <CodeBlock/>; keep raw <pre> neutral,
+  //    except classless ones (react-markdown without a pre component) ──
+  .md-body pre {
+    @apply m-0 rounded-none border-0 bg-transparent p-0;
+  }
+  .md-body pre:not([class]) {
+    @apply my-2 overflow-x-auto rounded-lg border border-surface-600 bg-surface-950 p-3;
+    box-shadow: 0 10px 30px -20px rgba(0, 0, 0, 0.8);
+  }
+  .md-body pre code {
+    @apply bg-transparent p-0 font-mono text-[13px] leading-relaxed text-slate-200;
+  }
+
+  // ── Blockquote — accent bar + soft cyan wash card ────────────
+  .md-body blockquote {
+    @apply my-2.5 overflow-hidden rounded-r-xl py-2 pl-4 pr-3.5 text-ink-secondary;
+    border-left: 3px solid hsl(var(--accent));
+    border-top: 1px solid rgba(34, 211, 238, 0.16);
+    border-right: 1px solid rgba(34, 211, 238, 0.12);
+    border-bottom: 1px solid rgba(34, 211, 238, 0.12);
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.07), rgba(139, 92, 246, 0.03) 45%, transparent);
+    border-radius: 0 0.75rem 0.75rem 0;
+  }
+  .md-body blockquote p {
+    @apply my-0.5;
+  }
+  .md-body blockquote > :last-child {
+    @apply mb-0;
+  }
+
+  // ── Tables — purple-tinted header, zebra + hover rows ────────
+  .md-body table {
+    @apply w-full border-collapse text-[13px];
+  }
+  .md-body th {
+    @apply border border-surface-600/70 px-2.5 py-1.5 text-left font-semibold text-white;
+    background: linear-gradient(180deg, rgba(251, 191, 36, 0.16), rgba(251, 191, 36, 0.03));
+  }
+  .md-body td {
+    @apply border border-surface-600/70 px-2.5 py-1.5 text-ink-secondary;
+    overflow-wrap: break-word;
+    word-break: break-word;
+  }
+  .md-body tbody tr:nth-child(even) td {
+    background: rgba(255, 255, 255, 0.023);
+  }
+  .md-body tbody tr:hover td {
+    background: rgba(251, 191, 36, 0.07);
+  }
+
+  // ── Horizontal rule — gradient hairline ──────────────────────
+  .md-body hr {
+    @apply my-4 border-0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(251, 191, 36, 0.55), rgba(253, 224, 71, 0.5), transparent);
+  }
+
+  // ── Media / misc ─────────────────────────────────────────────
   .md-body img,
   .md-body video,
   .md-body iframe {
-    @apply max-w-full;
+    @apply my-2 max-w-full rounded-xl border border-white/10;
+    box-shadow: 0 14px 40px -18px rgba(0, 0, 0, 0.8);
+  }
+  .md-body details {
+    @apply my-2 rounded-lg border border-surface-700 bg-surface-900/60 p-2.5;
+  }
+  .md-body summary {
+    @apply cursor-pointer font-medium text-ink-primary;
+  }
+  .md-body .footnotes {
+    @apply mt-6 border-t border-surface-700 pt-3 text-xs text-ink-muted;
+  }
+  .md-body .footnotes ol {
+    @apply pl-5;
   }
   .md-body p,
   .md-body li {
     min-width: 0;
     overflow-wrap: break-word;
+  }
+
+  // ────────────────────────────────────────────────────────────────
+  // Agent live status rail: sub-contexts + task list.
+  // Pinned to the top of the chat scroll area. Cards sit on their own
+  // solid surfaces (gradient + border accent) so the rail itself stays
+  // TRANSPARENT — no full-width translucent band, meaning the chat edges
+  // on the left/right are never blurred or washed out.
+  // ────────────────────────────────────────────────────────────────
+  .agent-status-rail {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    margin-bottom: $space-1;
+    display: flex;
+    flex-direction: column;
+    gap: $space-1;
+    padding: $space-1 0;
+  }
+
+  // When there is room to the LEFT of the chat (workspace sidebar / editor
+  // closed), the status cards move into a fixed side column and the chat is
+  // pushed to the right. The column disappears as soon as the work is done.
+  .agent-side-rail {
+    flex-shrink: 0;
+    width: clamp(240px, 26%, 300px);
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: $space-1;
+    padding: $space-2 $space-1 $space-2 $space-3;
+    border-right: 1px solid $border-subtle;
+
+    .agent-card {
+      margin-left: 0;
+    }
+
+    .agent-card__body {
+      padding-left: $space-1;
+    }
+  }
+
+  .agent-side-rail__header {
+    display: flex;
+    align-items: center;
+    gap: $space-2;
+    margin-bottom: $space-1;
+    padding-left: $space-1;
+  }
+
+  .agent-side-rail__title {
+    flex: 1;
+    min-width: 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: $ink-muted;
+  }
+
+  .agent-side-rail__close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    border-radius: 6px;
+    color: $ink-muted;
+    transition: all 0.15s ease;
+    cursor: pointer;
+
+    &:hover {
+      color: $ink-primary;
+      background: $surface-800;
+    }
+  }
+
+  .agent-card {
+    margin-left: $space-6;
+    padding: 3px $space-1;
+    border: 1px solid $border-subtle;
+    border-radius: $radius-sm;
+    background: linear-gradient(180deg, hsla(220, 33%, 11%, 0.9), hsla(220, 33%, 8%, 0.8));
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.02) inset,
+      0 2px 10px -6px rgba(0, 0, 0, 0.55);
+    transition: border-color 150ms ease;
+
+    &--context {
+      border-left: 2px solid rgba(139, 92, 246, 0.45);
+    }
+    &--todo {
+      border-left: 2px solid rgba(52, 211, 153, 0.4);
+    }
+
+    &:hover {
+      border-color: $border-hover;
+    }
+
+    &__header {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: $space-1;
+      padding: $space-1 0;
+      text-align: left;
+      color: $ink-primary;
+      transition: color 150ms ease;
+
+      &:hover {
+        color: $ink-primary;
+      }
+    }
+
+    &__icon {
+      flex-shrink: 0;
+      width: 12px;
+      height: 12px;
+    }
+
+    &__title {
+      font-size: 11px;
+      font-weight: 500;
+      color: rgba(248, 250, 252, 0.8);
+    }
+
+    &__count {
+      font-size: 10px;
+      color: $ink-muted;
+    }
+
+    &__chevron {
+      flex-shrink: 0;
+      width: 12px;
+      height: 12px;
+      color: rgba($ink-muted, 0.8);
+
+      &:hover {
+        color: $ink-secondary;
+      }
+    }
+
+    &__body {
+      padding: 0 0 $space-1 $space-4;
+    }
+  }
+
+  .context-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: $space-1;
+    max-width: 100%;
+    padding: 2px $space-1;
+    border: 1px solid rgba(139, 92, 246, 0.22);
+    border-radius: $radius-sm;
+    background: rgba(139, 92, 246, 0.1);
+    font-size: 10px;
+    line-height: 1.3;
+    color: rgba(221, 214, 254, 0.9);
+    overflow-wrap: break-word;
+
+    svg {
+      flex-shrink: 0;
+      width: 10px;
+      height: 10px;
+      color: rgba(196, 181, 253, 0.6);
+    }
+  }
+
+  .status-event {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-size: 9px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+
+    &--open {
+      color: $success;
+    }
+    &--close {
+      color: rgba($ink-muted, 0.6);
+    }
+  }
+
+  .todo-row {
+    display: flex;
+    align-items: center;
+    gap: $space-2;
+    padding: 2px 0;
+    font-size: 11px;
+
+    &--cancelled {
+      opacity: 0.4;
+    }
+
+    &__check {
+      display: flex;
+      flex-shrink: 0;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      border: 1px solid $border;
+      border-radius: $radius-full;
+
+      svg {
+        width: 10px;
+        height: 10px;
+      }
+
+      &--done {
+        border-color: rgba(52, 211, 153, 0.5);
+        background: rgba(52, 211, 153, 0.15);
+        color: $success;
+      }
+      &--active {
+        border-color: rgba(96, 165, 250, 0.5);
+        background: rgba(96, 165, 250, 0.15);
+        color: rgb(147, 197, 253);
+      }
+    }
+
+    &__text {
+      min-width: 0;
+      flex: 1;
+      overflow-wrap: break-word;
+      line-height: 1.4;
+      color: $ink-secondary;
+
+      &--done,
+      &--cancelled {
+        text-decoration: line-through;
+        color: rgba($ink-muted, 0.75);
+      }
+    }
   }
 }
 

@@ -49,22 +49,31 @@ function readStandaloneMode(): UiMode {
 
 function loadPersisted(): Partial<WorkspaceState> {
   if (typeof window === 'undefined') return {};
+  let parsed: { [K in keyof WorkspaceState]?: WorkspaceState[K] } = {};
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { uiMode: readStandaloneMode() };
-    const parsed = JSON.parse(raw);
-    return {
-      sidePanelOpen: parsed.sidePanelOpen,
-      explorerWidth: parsed.explorerWidth,
-      agentWidth: parsed.agentWidth,
-      terminalHeight: parsed.terminalHeight,
-      bottomPanelState: parsed.bottomPanelState,
-      activePanel: parsed.activePanel,
-      uiMode: parsed.uiMode === 'simple' ? 'simple' : parsed.uiMode === 'dev' ? 'dev' : readStandaloneMode(),
-    };
-  } catch {
-    return { uiMode: readStandaloneMode() };
+    if (raw) parsed = JSON.parse(raw);
+  } catch { /* ignore */ }
+
+  // Deep link from the unified rail on other pages (?panel=<tab>) — always
+  // wins over whatever was persisted so the panel opens on arrival.
+  const panel = new URLSearchParams(window.location.search).get('panel');
+  const valid = ['explorer', 'search', 'scm', 'agent', 'terminal', 'ssh', 'settings'];
+  if (panel && valid.includes(panel)) {
+    parsed.activePanel = panel as ActivityPanel;
+    parsed.sidePanelOpen = true;
   }
+
+  if (Object.keys(parsed).length === 0) return { uiMode: readStandaloneMode() };
+  return {
+    sidePanelOpen: parsed.sidePanelOpen,
+    explorerWidth: parsed.explorerWidth,
+    agentWidth: parsed.agentWidth,
+    terminalHeight: parsed.terminalHeight,
+    bottomPanelState: parsed.bottomPanelState,
+    activePanel: parsed.activePanel,
+    uiMode: parsed.uiMode === 'simple' ? 'simple' : parsed.uiMode === 'dev' ? 'dev' : readStandaloneMode(),
+  };
 }
 
 function persistState(state: WorkspaceState) {

@@ -310,7 +310,9 @@ export class OmniRouteService implements OnApplicationBootstrap {
       PATH: this.toolPath(),
     };
     const bin = this.binaryPath() || 'omniroute';
-    const child = spawn(bin, [], {
+    // `--no-open` keeps the dashboard from auto-opening a browser tab when the
+    // gateway boots during login — the app shell is the UI, not OmniRoute's.
+    const child = spawn(bin, ['serve', '--no-open'], {
       env,
       detached: true,
       stdio: 'ignore',

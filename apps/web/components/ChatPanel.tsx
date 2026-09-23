@@ -173,6 +173,9 @@ export function ChatPanel({
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const [omnirouteServerEnabled, setOmnirouteServerEnabled] = useState(false);
   const [omnirouteModels, setOmnirouteModels] = useState<string[]>([]);
+  const [omniHealth, setOmniHealth] = useState<
+    Record<string, { available: boolean; latencyMs: number | null; keyRequired: boolean; isFree: boolean }>
+  >({});
   const [openrouterModels, setOpenrouterModels] = useState<string[]>([]);
   const [webSearchServerEnabled, setWebSearchServerEnabled] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
@@ -276,8 +279,27 @@ export function ChatPanel({
     if (provider !== 'omniroute') return;
     api
       .fetchOmniRouteModels()
-      .then((res) => setOmnirouteModels(res.models.map((m) => m.id)))
-      .catch(() => setOmnirouteModels([]));
+      .then((res) => {
+        const models = res.models;
+        setOmnirouteModels(models.map((m) => m.id));
+        setOmniHealth(
+          Object.fromEntries(
+            models.map((m) => [
+              m.id,
+              {
+                available: !!m.isAvailable,
+                latencyMs: m.latencyMs ?? null,
+                keyRequired: !!m.keyRequired,
+                isFree: !!m.isFree,
+              },
+            ]),
+          ),
+        );
+      })
+      .catch(() => {
+        setOmnirouteModels([]);
+        setOmniHealth({});
+      });
   }, [provider]);
 
   // The OpenRouter feed changes often (new families, :free drops, renames), so
@@ -681,6 +703,7 @@ export function ChatPanel({
       model={model}
       defaultProvider={defaultProvider}
       presets={presets}
+      modelInfo={provider === 'omniroute' ? omniHealth : undefined}
       onModelChange={handleModelChange}
       onAttach={attachFile}
       omnirouteServerEnabled={omnirouteServerEnabled}
@@ -715,7 +738,7 @@ export function ChatPanel({
   return (
     <div className="relative flex h-full w-full flex-col overflow-hidden lg:flex-row">
       {/* ── Desktop conversation column (lg+) ─────────────────────────────── */}
-      <aside className="hidden w-72 shrink-0 flex-col border-r border-surface-800 bg-surface-950 lg:flex">
+      <aside className="hidden w-72 shrink-0 flex-col border-r border-surface-800 bg-bg-elevated lg:flex">
         <div className="flex items-center gap-2 px-3 pb-2 pt-3">
           <Link href="/" className="flex items-center gap-2 text-sm font-semibold text-white">
             <BrandIcon size={40} className="rounded-lg" />
@@ -768,7 +791,7 @@ export function ChatPanel({
       {/* ── Chat workspace ───────────────────────────────────────────────── */}
       <main className="relative flex min-w-0 min-h-0 flex-1 flex-col overflow-hidden bg-bg">
         {/* Mobile top bar */}
-        <header className="flex h-14 shrink-0 items-center justify-between gap-1.5 border-b border-surface-800 bg-surface-950/80 px-2.5 backdrop-blur lg:hidden">
+        <header className="flex h-14 shrink-0 items-center justify-between gap-1.5 border-b border-surface-800 bg-bg-elevated/80 px-2.5 backdrop-blur lg:hidden">
           <MobileDrawer
             recentChats={conversations}
             activeChatId={activeId}
@@ -905,7 +928,7 @@ export function ChatPanel({
       {/* ── Desktop sources panel (overlay from right) ──────────────────── */}
       <div
         className={cn(
-          'absolute inset-y-0 right-0 z-40 hidden w-[360px] flex-col border-l border-surface-800 bg-surface-950/95 shadow-2xl backdrop-blur transition-transform duration-300 ease-out lg:flex',
+          'absolute inset-y-0 right-0 z-40 hidden w-[360px] flex-col border-l border-surface-800 bg-bg-elevated/95 shadow-2xl backdrop-blur transition-transform duration-300 ease-out lg:flex',
           sourcesOpen ? 'translate-x-0' : 'pointer-events-none translate-x-full',
         )}
       >

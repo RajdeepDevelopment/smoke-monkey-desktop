@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   Check, CheckSquare, MessageSquare, PenLine, Send, X,
 } from 'lucide-react';
@@ -42,16 +42,27 @@ export function AskUserDialog({ open, question, options, multiple, onResolve, on
   const [userCustom, setUserCustom] = useState(false);
   const customMode = userCustom || options.length === 0;
 
+  const labelToDesc = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const o of options) m.set(o.label, o.description || '');
+    return m;
+  }, [options]);
+
+  const formatChoice = useCallback((label: string) => {
+    const desc = labelToDesc.get(label);
+    return desc ? `${label} — ${desc}` : label;
+  }, [labelToDesc]);
+
   const choice = useMemo(() => {
     if (customMode) return custom.trim();
     if (options.length > 0) {
       if (multiple) {
-        return selected.length > 0 ? selected.join(', ') : '';
+        return selected.length > 0 ? selected.map(formatChoice).join(', ') : '';
       }
-      return selected[0] || '';
+      return selected[0] ? formatChoice(selected[0]) : '';
     }
     return custom.trim();
-  }, [options, multiple, selected, custom, customMode]);
+  }, [options, multiple, selected, custom, customMode, formatChoice]);
 
   const canSubmit = choice.length > 0;
 
@@ -75,7 +86,7 @@ export function AskUserDialog({ open, question, options, multiple, onResolve, on
 
         <div className="flex items-start gap-3.5 p-6 pb-3">
           <div className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/15 ring-1 ring-primary/25 shadow-[0_0_24px_-6px_rgba(59,130,246,0.5)]">
-            <MessageSquare className="h-5 w-5 text-primary" />
+            <MessageSquare className="h-5 w-5 text-[#c4b5fd]" />
             <span className="absolute -right-0.5 -top-0.5 flex h-2.5 w-2.5">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-60" />
               <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-blue-500" />

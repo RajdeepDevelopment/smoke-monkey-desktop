@@ -13,7 +13,7 @@ export interface ToolContext {
   toolCallId?: string;
   /** SQLite-backed workspace index for fast symbol/reference lookups. */
   workspaceIndex?: import('../services/workspace-index').WorkspaceIndex;
-  /** Event emitter for real-time UI updates (tool.output, todo.updated, etc.). */
+  /** Event emitter for real-time UI updates (tool.output, context.updated, etc.). */
   eventEmitter?: import('../services/agent-event.emitter').AgentEventEmitter;
   /** When set, commands should execute on the remote host (SSH profile). */
   remoteSsh?: { destinationId: string; userId: string };

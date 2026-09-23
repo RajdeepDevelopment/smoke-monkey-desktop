@@ -77,6 +77,10 @@ export class AgentEventEmitter {
     this.emitRun(sessionId, runId, 'tool.failed', { toolCallId, error });
   }
 
+  emitTodoUpdated(sessionId: string, runId: string, todos: unknown[]): void {
+    this.emitRun(sessionId, runId, 'todo.updated', { todos });
+  }
+
   emitPermissionRequired(sessionId: string, runId: string, toolCallId: string, toolName: string, args: unknown): void {
     this.emitRun(sessionId, runId, 'permission.required', { toolCallId, toolName, args });
   }
@@ -133,14 +137,31 @@ export class AgentEventEmitter {
     this.emitRun(sessionId, runId, 'ask_user.response', { toolCallId, response });
   }
 
-  emitTodoUpdated(sessionId: string, runId: string, todos: unknown[]): void {
-    this.emitRun(sessionId, runId, 'todo.updated', { todos });
+  /** Emitted when an MCP stock recommendation needs the user's decision: the
+   *  run PAUSES (status waiting_mcp_approval) until the user enables, adds, or
+   *  skips via the resolve endpoint / mcp.resolved event below. */
+  emitMcpApprovalRequired(
+    sessionId: string,
+    runId: string,
+    toolCallId: string,
+    payload: { task: string | null; servers: unknown[]; recommendedToEnableIds: string[]; recommendedToAddIds: string[] },
+  ): void {
+    this.emitRun(sessionId, runId, 'mcp.approval_required', { toolCallId, payload });
+  }
+
+  emitMcpResolved(
+    sessionId: string,
+    runId: string,
+    toolCallId: string,
+    decision: { action: 'enable' | 'add' | 'skip'; names: string[] },
+  ): void {
+    this.emitRun(sessionId, runId, 'mcp.resolved', { toolCallId, action: decision.action, names: decision.names });
   }
 
   /**
    * Emits the run's live sub-context state every time the agent opens/closes
    * a context, so the UI streams "frontend_ui opened · backend_scale closed"
-   * in real time (same channel as todo.updated).
+   * in real time.
    */
   emitContextUpdated(
     sessionId: string,

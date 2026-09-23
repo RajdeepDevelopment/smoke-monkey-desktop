@@ -1,15 +1,17 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { motion } from 'framer-motion';
 import { BarChart3, Loader2, RefreshCw, ShieldAlert, Timer, TrendingUp } from 'lucide-react';
 import type { MetricsSummaryDto } from '@rag/contracts';
 import { api } from '../../lib/api';
 import { PageScroll } from '../../components/PageScroll';
 import { PageHeader } from '../../components/PageHeader';
 import { MetricCard } from '../../components/MetricCard';
-import { StatusBadge } from '../../components/StatusBadge';
 import { EmptyState } from '../../components/EmptyState';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../../components/ui/card';
+import { BarChart } from '../../components/ui/bar-chart';
+import { PieChart } from '../../components/ui/pie-chart';
+import type { ChartConfig } from '../../components/ui/chart';
 import { cn } from '../../lib/utils';
 
 function pct(v: number | undefined): string {
@@ -17,50 +19,28 @@ function pct(v: number | undefined): string {
   return `${(v * 100).toFixed(1)}%`;
 }
 
-function AnimatedBar({
-  label,
-  value,
-  max,
-  accent,
-  delay = 0,
-  suffix = '',
-}: {
-  label: string;
-  value: number;
-  max: number;
-  accent: string;
-  delay?: number;
-  suffix?: string;
-}) {
-  const width = max > 0 ? Math.max(2, (value / max) * 100) : 0;
-  return (
-    <div className="flex items-center gap-3">
-      <span className="w-24 shrink-0 truncate text-xs text-ink-secondary" title={label}>
-        {label}
-      </span>
-      <div className="h-2 flex-1 overflow-hidden rounded-full bg-surface-700/70">
-        <motion.div
-          initial={{ width: 0 }}
-          animate={{ width: `${width}%` }}
-          transition={{ duration: 0.6, delay, ease: 'easeOut' }}
-          className={cn('h-full rounded-full', accent)}
-        />
-      </div>
-      <span className="w-14 shrink-0 text-right font-mono text-xs tabular-nums text-ink-secondary">
-        {Math.round(value)}
-        {suffix}
-      </span>
-    </div>
-  );
+const PRIMARY = '#8B5CF6';
+const ACCENT = '#22D3EE';
+const WARNING = '#F59E0B';
+const SUCCESS = '#34D399';
+const ERROR = '#F87171';
+
+const MODE_COLORS: Record<string, string> = {
+  chat: ACCENT,
+  retrieve: PRIMARY,
+  retrieve_only: PRIMARY,
+  query: ACCENT,
+  stream: ACCENT,
+};
+
+function friendly(k: string): string {
+  const map: Record<string, string> = { chat: 'Chat', retrieve: 'Retrieval', retrieve_only: 'Retrieval', query: 'Query', stream: 'Stream' };
+  return map[k] ?? k;
 }
 
-function Panel({ title, children, className }: { title: string; children: React.ReactNode; className?: string }) {
-  return (
-    <div className={cn('card p-4 sm:p-5', className)}>
-      <h3 className="mb-3 text-sm font-semibold text-ink-primary">{title}</h3>
-      {children}
-    </div>
-  );
+function truncate(v: string | number): string {
+  const s = String(v);
+  return s.length > 16 ? `${s.slice(0, 15)}…` : s;
 }
 
 export default function AnalyticsPage() {
@@ -84,12 +64,66 @@ export default function AnalyticsPage() {
     void load();
   }, [load]);
 
-  const byMode = metrics?.byMode ?? {};
-  const byProvider = metrics?.byProvider ?? {};
-  const maxMode = Math.max(1, ...Object.values(byMode));
-  const maxProvider = Math.max(1, ...Object.values(byProvider));
-  const stage = metrics?.byStage;
   const hasTraffic = (metrics?.requests ?? 0) > 0;
+
+  // ── Latency percentiles ─────────────────────────────────────────────────
+  const latencyData = metrics
+    ? [
+        { name: 'p50', value: Math.round(metrics.totalMsPercentiles.p50) },
+        { name: 'p90', value: Math.round(metrics.totalMsPercentiles.p90) },
+        { name: 'p95', value: Math.round(metrics.totalMsPercentiles.p95) },
+        { name: 'p99', value: Math.round(metrics.totalMsPercentiles.p99) },
+      ]
+    : [];
+  const latencyConfig: ChartConfig = {
+    value: { label: 'Latency', color: WARNING },
+  };
+
+  // ── Average stage latency ───────────────────────────────────────────────
+  const stageData = metrics
+    ? [
+        { name: 'Embed', value: Math.round(metrics.byStage.embeddingMs) },
+        { name: 'Retrieve', value: Math.round(metrics.byStage.retrievalMs) },
+        { name: 'Rerank', value: Math.round(metrics.byStage.rerankerMs) },
+        { name: 'TTFT', value: Math.round(metrics.byStage.llmTtftMs) },
+        { name: 'Generate', value: Math.round(metrics.byStage.llmGenerationMs) },
+      ]
+    : [];
+  const stageConfig: ChartConfig = {
+    value: { label: 'Stage avg', color: ACCENT },
+  };
+
+  // ── Requests by type (donut) ────────────────────────────────────────────
+  const byTypeData = metrics
+    ? Object.entries(metrics.byType)
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, value]) => ({ name: friendly(name), value }))
+    : [];
+  // Rebuild config from actual keys so each donut slice gets a color.
+  const typeConfigFinal: ChartConfig = byTypeData.reduce<ChartConfig>((acc, d) => {
+    acc[d.name] = { label: d.name, color: MODE_COLORS[d.name.toLowerCase()] ?? PRIMARY };
+    return acc;
+  }, {});
+
+  // ── Requests by mode ────────────────────────────────────────────────────
+  const byModeData = metrics
+    ? Object.entries(metrics.byMode)
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, value]) => ({ name: friendly(name), value }))
+    : [];
+  const modeConfig: ChartConfig = {
+    value: { label: 'Requests', color: PRIMARY },
+  };
+
+  // ── Requests by provider ────────────────────────────────────────────────
+  const byProviderData = metrics
+    ? Object.entries(metrics.byProvider)
+        .sort((a, b) => b[1] - a[1])
+        .map(([name, value]) => ({ name, value }))
+    : [];
+  const providerConfig: ChartConfig = {
+    value: { label: 'Requests', color: ACCENT },
+  };
 
   return (
     <PageScroll>
@@ -139,6 +173,7 @@ export default function AnalyticsPage() {
 
         {metrics && hasTraffic && (
           <div className="space-y-6">
+            {/* KPI row */}
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
               <MetricCard
                 label="Requests"
@@ -146,7 +181,7 @@ export default function AnalyticsPage() {
                 hint={
                   Object.keys(metrics.byType).length
                     ? Object.entries(metrics.byType)
-                        .map(([k, v]) => `${k} ${v}`)
+                        .map(([k, v]) => `${friendly(k)} ${v}`)
                         .join(' · ')
                     : 'no traffic yet'
                 }
@@ -175,95 +210,161 @@ export default function AnalyticsPage() {
               />
             </div>
 
+            {/* Latency + stage timing */}
             <div className="grid gap-4 lg:grid-cols-2">
-              <Panel title="Latency percentiles">
-                <div className="grid grid-cols-2 gap-2.5">
-                  {(
-                    [
-                      ['p50', metrics.totalMsPercentiles.p50],
-                      ['p90', metrics.totalMsPercentiles.p90],
-                      ['p95', metrics.totalMsPercentiles.p95],
-                      ['p99', metrics.totalMsPercentiles.p99],
-                    ] as const
-                  ).map(([label, ms]) => (
-                    <div
-                      key={label}
-                      className="rounded-xl border border-surface-800 bg-surface-900/60 p-3.5 transition-colors hover:border-primary/20"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs text-ink-muted">{label}</span>
-                        <StatusBadge
-                          label={Math.round(ms) <= 1500 ? 'OK' : Math.round(ms) <= 4000 ? 'Slow' : 'Critical'}
-                          tone={Math.round(ms) <= 1500 ? 'success' : Math.round(ms) <= 4000 ? 'warning' : 'error'}
-                        />
+              <Card className="overflow-hidden">
+                <CardHeader>
+                  <CardTitle>Latency percentiles</CardTitle>
+                  <CardDescription>Total request latency across the window</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <BarChart
+                    data={latencyData}
+                    dataKey="value"
+                    xKey="name"
+                    config={latencyConfig}
+                    barSize={46}
+                    radius={[6, 6, 6, 6]}
+                  />
+                  <div className="mt-2 grid grid-cols-4 gap-2">
+                    {(
+                      [
+                        ['p50', metrics.totalMsPercentiles.p50],
+                        ['p90', metrics.totalMsPercentiles.p90],
+                        ['p95', metrics.totalMsPercentiles.p95],
+                        ['p99', metrics.totalMsPercentiles.p99],
+                      ] as const
+                    ).map(([label, ms]) => (
+                      <div key={label} className="rounded-lg border border-surface-800 bg-surface-900/60 px-2.5 py-2 text-center">
+                        <div className="text-[10px] uppercase tracking-wider text-ink-muted">{label}</div>
+                        <div className={cn('text-sm font-semibold tabular-nums', Math.round(ms) > 4000 ? 'text-red-400' : Math.round(ms) > 1500 ? 'text-amber-400' : 'text-emerald-400')}>
+                          {Math.round(ms)}<span className="ml-0.5 text-[10px] font-normal text-ink-muted">ms</span>
+                        </div>
                       </div>
-                      <div className="mt-1 text-xl font-semibold tabular-nums text-ink-primary">
-                        {Math.round(ms)} <span className="text-xs font-normal text-ink-muted">ms</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </Panel>
-
-              <Panel title="Average stage latency">
-                {stage ? (
-                  <div className="space-y-3">
-                    <AnimatedBar label="Embedding" value={Math.round(stage.embeddingMs)} max={Math.max(1, Math.round(stage.llmGenerationMs))} accent="bg-accent" delay={0.05} suffix="ms" />
-                    <AnimatedBar label="Retrieval" value={Math.round(stage.retrievalMs)} max={Math.max(1, Math.round(stage.llmGenerationMs))} accent="bg-accent" delay={0.1} suffix="ms" />
-                    <AnimatedBar label="Rerank" value={Math.round(stage.rerankerMs)} max={Math.max(1, Math.round(stage.llmGenerationMs))} accent="bg-warning" delay={0.15} suffix="ms" />
-                    <AnimatedBar label="TTFT" value={Math.round(stage.llmTtftMs)} max={Math.max(1, Math.round(stage.llmGenerationMs))} accent="bg-primary" delay={0.2} suffix="ms" />
-                    <AnimatedBar label="Generation" value={Math.round(stage.llmGenerationMs)} max={Math.max(1, Math.round(stage.llmGenerationMs))} accent="bg-primary" delay={0.25} suffix="ms" />
+                    ))}
                   </div>
-                ) : (
-                  <p className="text-sm text-ink-muted">No timing data yet.</p>
-                )}
-              </Panel>
+                </CardContent>
+              </Card>
+
+              <Card className="overflow-hidden">
+                <CardHeader>
+                  <CardTitle>Average stage latency</CardTitle>
+                  <CardDescription>Mean time per pipeline stage</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {metrics.byStage.embeddingMs + metrics.byStage.retrievalMs + metrics.byStage.llmGenerationMs > 0 ? (
+                    <BarChart
+                      data={stageData}
+                      dataKey="value"
+                      xKey="name"
+                      config={stageConfig}
+                      barSize={46}
+                      radius={[6, 6, 6, 6]}
+                    />
+                  ) : (
+                    <p className="flex h-[260px] items-center justify-center text-sm text-ink-muted">No timing data yet.</p>
+                  )}
+                </CardContent>
+              </Card>
             </div>
 
+            {/* Distribution */}
             <div className="grid gap-4 lg:grid-cols-2">
-              <Panel title="Requests by mode">
-                {Object.keys(byMode).length === 0 ? (
-                  <p className="text-sm text-ink-muted">No requests yet.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {Object.entries(byMode)
-                      .sort((a, b) => b[1] - a[1])
-                      .map(([mode, count], i) => (
-                        <AnimatedBar key={mode} label={mode} value={count} max={maxMode} accent="bg-accent" delay={i * 0.05} />
-                      ))}
-                  </div>
-                )}
-              </Panel>
+              <Card className="overflow-hidden">
+                <CardHeader>
+                  <CardTitle>Requests by type</CardTitle>
+                  <CardDescription>Chat vs retrieval traffic split</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {byTypeData.length > 0 ? (
+                    <>
+                      <PieChart
+                        data={byTypeData}
+                        config={typeConfigFinal}
+                        innerRadius={72}
+                        outerRadius={104}
+                      />
+                      <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 pt-1">
+                        {byTypeData.map((d) => (
+                          <div key={d.name} className="flex items-center gap-1.5 text-[11px] text-ink-muted">
+                            <span className="h-2 w-2 rounded-[2px]" style={{ backgroundColor: MODE_COLORS[d.name.toLowerCase()] ?? PRIMARY }} />
+                            {d.name}
+                            <span className="font-mono tabular-nums text-ink-secondary">{d.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <p className="flex h-[260px] items-center justify-center text-sm text-ink-muted">No requests yet.</p>
+                  )}
+                </CardContent>
+              </Card>
 
-              <Panel title="Requests by provider">
-                {Object.keys(byProvider).length === 0 ? (
-                  <p className="text-sm text-ink-muted">No requests yet.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {Object.entries(byProvider)
-                      .sort((a, b) => b[1] - a[1])
-                      .map(([provider, count], i) => (
-                        <AnimatedBar key={provider} label={provider} value={count} max={maxProvider} accent="bg-primary" delay={i * 0.05} />
-                      ))}
-                  </div>
-                )}
-              </Panel>
+              <Card className="overflow-hidden">
+                <CardHeader>
+                  <CardTitle>Requests by mode</CardTitle>
+                  <CardDescription>How requests arrived in this window</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {byModeData.length > 0 ? (
+                    <BarChart
+                      data={byModeData}
+                      dataKey="value"
+                      xKey="name"
+                      config={modeConfig}
+                      barSize={46}
+                      radius={[6, 6, 6, 6]}
+                      tickFormatter={(v) => truncate(v)}
+                    />
+                  ) : (
+                    <p className="flex h-[260px] items-center justify-center text-sm text-ink-muted">No requests yet.</p>
+                  )}
+                </CardContent>
+              </Card>
             </div>
+
+            {/* Providers */}
+            <Card className="overflow-hidden">
+              <CardHeader>
+                <CardTitle>Requests by provider</CardTitle>
+                <CardDescription>Which LLM providers handled this window's traffic</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {byProviderData.length > 0 ? (
+                  <BarChart
+                    data={byProviderData}
+                    dataKey="value"
+                    xKey="name"
+                    config={providerConfig}
+                    series={['value']}
+                    tickFormatter={(v) => truncate(String(v).replace(/^provider/i, ''))}
+                  />
+                ) : (
+                  <p className="flex h-[260px] items-center justify-center text-sm text-ink-muted">No requests yet.</p>
+                )}
+              </CardContent>
+            </Card>
 
             {metrics.recentErrors.length > 0 && (
-              <Panel title="Recent errors">
-                <ul className="space-y-1.5">
-                  {metrics.recentErrors.map((msg, i) => (
-                    <li
-                      key={i}
-                      className="truncate rounded-lg border border-error/15 bg-error-subtle px-3 py-1.5 text-xs text-red-300"
-                      title={msg}
-                    >
-                      {msg}
-                    </li>
-                  ))}
-                </ul>
-              </Panel>
+              <Card className="overflow-hidden">
+                <CardHeader>
+                  <CardTitle>Recent errors</CardTitle>
+                  <CardDescription>Latest failures from the request pipeline</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <ul className="space-y-1.5">
+                    {metrics.recentErrors.map((msg, i) => (
+                      <li
+                        key={i}
+                        className="truncate rounded-lg border border-error/15 bg-error-subtle px-3 py-1.5 text-xs text-red-300"
+                        title={msg}
+                      >
+                        {msg}
+                      </li>
+                    ))}
+                  </ul>
+                </CardContent>
+              </Card>
             )}
           </div>
         )}

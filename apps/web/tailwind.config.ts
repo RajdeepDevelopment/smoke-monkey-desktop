@@ -130,6 +130,27 @@ const config: Config = {
           from: { opacity: '0', transform: 'translateY(6px)' },
           to: { opacity: '1', transform: 'translateY(0)' },
         },
+        'fade-up': {
+          from: { opacity: '0', transform: 'translateY(16px) scale(0.99)' },
+          to: { opacity: '1', transform: 'translateY(0) scale(1)' },
+        },
+        'loader-ring': {
+          '0%': { transform: 'scale(0.55)', opacity: '0.9' },
+          '100%': { transform: 'scale(1.55)', opacity: '0' },
+        },
+        'loader-glow': {
+          '0%, 100%': { opacity: '0.55', transform: 'scale(0.92)' },
+          '50%': { opacity: '1', transform: 'scale(1.08)' },
+        },
+        'loader-breathe': {
+          '0%, 100%': { transform: 'scale(1)', filter: 'brightness(1)' },
+          '50%': { transform: 'scale(1.06)', filter: 'brightness(1.18)' },
+        },
+        'loader-sweep': {
+          '0%': { transform: 'translateX(-120%)' },
+          '60%': { transform: 'translateX(230%)' },
+          '100%': { transform: 'translateX(250%)' },
+        },
       },
       animation: {
         'accordion-down': 'accordion-down 0.2s ease-out',
@@ -137,6 +158,11 @@ const config: Config = {
         shimmer: 'shimmer 1.6s linear infinite',
         'pulse-soft': 'pulse-soft 2s ease-in-out infinite',
         'fade-in': 'fade-in 0.3s ease-out both',
+        'fade-up': 'fade-up 0.45s cubic-bezier(0.22, 1, 0.36, 1) both',
+        'loader-ring': 'loader-ring 2.2s cubic-bezier(0.22, 1, 0.36, 1) infinite',
+        'loader-glow': 'loader-glow 2.4s ease-in-out infinite',
+        'loader-breathe': 'loader-breathe 2.4s ease-in-out infinite',
+        'loader-sweep': 'loader-sweep 1.8s ease-in-out infinite',
       },
     },
   },

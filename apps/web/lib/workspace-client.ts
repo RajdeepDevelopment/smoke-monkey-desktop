@@ -60,9 +60,9 @@ export function createWorkspaceClient(mode: WorkspaceMode) {
       return undefined;
     },
 
-    async gitStatus(cwd: string) {
-      if (!profileId) return ideApi.gitStatus(cwd);
-      return sshApi.gitStatus(profileId, cwd);
+    async gitStatus(cwd: string, opts?: { limit?: number; offset?: number }) {
+      if (!profileId) return ideApi.gitStatus(cwd, opts);
+      return sshApi.gitStatus(profileId, cwd, opts);
     },
   };
 }

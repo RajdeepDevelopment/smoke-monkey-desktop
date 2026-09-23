@@ -98,6 +98,10 @@ export interface ModelProvider {
   id: string;
   label: string;
   models: string[];
+  /** Pick-list grouping hint sent by the backend: paid / free-with-key / keyless. */
+  tier?: 'paid' | 'key' | 'keyless';
+  /** Model ids inside `models` that are free (no cost). */
+  freeModels?: string[];
 }
 
 /** A model listed in the reference catalog (embedding / rerank / chat). */
@@ -289,12 +293,40 @@ export interface OmniRouteModelDto {
   name: string;
   provider: string;
   isFree: boolean;
+  /** Health-check enrichments — present after the model-health ranker has run. */
+  family?: string;
+  protocol?: 'chat' | 'image' | 'video';
+  isAvailable?: boolean;
+  latencyMs?: number | null;
+  keyRequired?: boolean;
+  imageGeneration?: OmniRouteImageHealthDto;
+  checkedAt?: number | null;
+  lastError?: string | null;
+}
+
+/** Image/video generation probe result for a single OmniRoute model. */
+export interface OmniRouteImageHealthDto {
+  capable: boolean;
+  available: boolean;
+  latencyMs: number | null;
+  checkedAt: number | null;
+  lastError: string | null;
 }
 
 /** Response from GET /api/models/omniroute (live list from the OmniRoute proxy). */
 export interface OmniRouteModelsResponseDto {
   reachable: boolean;
   models: OmniRouteModelDto[];
+}
+
+/** Ranked/flagged response from GET /api/models/omniroute/ranked. */
+export interface OmniRouteRankedResponseDto {
+  reachable: boolean;
+  gatewayReachable: boolean;
+  updatedAt: number | null;
+  nextCheckAt: number | null;
+  ranked: OmniRouteModelDto[];
+  free: OmniRouteModelDto[];
 }
 
 /** Live OmniRoute provisioning lifecycle (drives the "Initializing…" UI). */
@@ -331,9 +363,49 @@ export interface McpServerDto {
   url: string | null;
   oauthConnected?: boolean;
   oauthExpiresAt?: number | null;
+  apiTokenSet?: boolean;
   enabled: boolean;
+  icon?: string | null;
+  category: string | null;
+  tags: string[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface McpStockEntryDto {
+  name: string;
+  label: string;
+  description: string;
+  category: string;
+  tags: string[];
+  transport: 'stdio' | 'http';
+  command: string;
+  args: string[];
+  envKeys: string[];
+  url: string | null;
+  icon: string | null;
+  keyGetUrl: string | null;
+  keyGetLabel: string | null;
+  dependency: string;
+  remote: boolean;
+  manualOAuth: boolean;
+  oauthScopes: string | null;
+}
+
+export interface McpStockCategoryDto {
+  label: string;
+  entries: McpStockEntryDto[];
+}
+
+export interface McpStockCatalogResponseDto {
+  categories: McpStockCategoryDto[];
+  total: number;
+}
+
+export interface McpImportResultDto {
+  created: Array<{ id: string; name: string }>;
+  skipped: Array<{ name: string; reason: string }>;
+  errors: string[];
 }
 
 export interface McpOAuthStartResultDto {
@@ -350,6 +422,20 @@ export interface McpTestResultDto {
   tools?: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
   error?: string;
   needsOAuth?: boolean;
+}
+
+/** Result of creating a server; includes the auto-run connectivity test. */
+export interface McpCreateResultDto {
+  id: string;
+  name: string;
+  existing?: boolean;
+  test: {
+    ok: boolean;
+    tools: number;
+    error: string | null;
+    needsOAuth: boolean;
+  };
+  enabled: boolean;
 }
 
 // ── Share / Hosting contracts ────────────────────────────────────────────────
@@ -468,8 +554,11 @@ export type AgentEventType =
   | 'permission.required'
   | 'run.started' | 'run.completed' | 'run.interrupted' | 'run.failed'
   | 'step.started' | 'step.ended'
+  | 'context.updated'
   | 'todo.updated'
-  | 'context.updated';
+  | 'phase.changed'
+  | 'ask_user.required' | 'ask_user.response'
+  | 'agent.state';
 
 export interface AgentEventDto {
   type: AgentEventType;

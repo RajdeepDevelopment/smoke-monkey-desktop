@@ -12,12 +12,14 @@ import { WorkspaceIndex } from './services/workspace-index';
 import { AgentId } from './entities/agent-session.entity';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { OmniRouteModelHealthService } from '../models/omniroute-health.service';
 import { AgentFileChange } from './entities/agent-file-change.entity';
 import { ToolRegistry } from './tools/tool-registry';
 import { Inject } from '@nestjs/common';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { OPENCODE_ZEN_MODEL_IDS, OPENCODE_ZEN_MODELS } from '../../common/constants/opencode-models';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -65,6 +67,7 @@ export class AgentController {
     @Inject(ToolRegistry)
     private readonly toolRegistry: ToolRegistry,
     private readonly workspaceIndex: WorkspaceIndex,
+    private readonly omniRouteHealth: OmniRouteModelHealthService,
   ) {}
 
   @Post('sessions')
@@ -196,8 +199,8 @@ export class AgentController {
       'step.started', 'step.ended',
       'llm.thinking',
       'ask_user.required', 'ask_user.response',
-      'todo.updated',
-      'phase.changed', 'agent.state',
+      'todo.updated', 'phase.changed', 'agent.state',
+      'mcp.stock', 'mcp.approval_required', 'mcp.resolved',
     ];
 
     return new Observable<MessageEvent>((subscriber) => {
@@ -274,6 +277,27 @@ export class AgentController {
     return { status: 'resolved' };
   }
 
+  /** Resolves a paused MCP approval decision (enable / add / skip). The paused
+   *  run resumes immediately and continues past the inspection with the user's
+   *  choice folded into the conversation. */
+  @Post('sessions/:id/mcp-resolve')
+  async resolveMcpDecision(
+    @Param('id') sessionId: string,
+    @Body() body: { toolCallId: string; action: 'enable' | 'add' | 'skip'; names?: string[] },
+  ) {
+    if (!body?.toolCallId) {
+      throw new BadRequestException('toolCallId is required');
+    }
+    if (!['enable', 'add', 'skip'].includes(body?.action)) {
+      throw new BadRequestException("action must be one of: enable, add, skip");
+    }
+    const resolved = this.agentService.resolveMcpDecision(sessionId, body.toolCallId, {
+      action: body.action,
+      names: Array.isArray(body.names) ? body.names : [],
+    });
+    return { status: resolved ? 'resolved' : 'no_pending_decision' };
+  }
+
   @Get('tools')
   async getTools() {
     return this.toolRegistry.getDefinitions();
@@ -305,41 +329,82 @@ export class AgentController {
 
   @Get('models')
   async getModels() {
-    // Agent-valid models ONLY: built from the provider allowlists in .env so
-    // the FE can never select a model the run backend will reject. The general
-    // chat catalog (which includes third-party free ids the agent doesn't
-    // support) is served by /api/models and is NOT used here.
+    // Every provider the agent LLM layer can actually call (see llm-client):
+    // OpenAI, OpenRouter, NVIDIA, xAI, Gemini, OpenCode Zen, OmniRoute, Ollama.
+    // Each provider carries a `tier` grouping flag (paid / key / keyless) plus
+    // `freeModels`, so the FE picker can split them into Paid / Free·with key /
+    // Free·without key without guessing.
+    const openrouterModels = this.splitCsv(process.env.OPENROUTER_CHAT_MODELS, [
+      'nvidia/nemotron-3-nano-30b-a3b:free',
+      'nvidia/nemotron-3-super-120b-a12b:free',
+      'deepseek/deepseek-v4-flash',
+      'deepseek/deepseek-v4-pro',
+      'z-ai/glm-5.2',
+      'nvidia/nemotron-3-ultra-550b-a55b',
+      'openrouter/free',
+    ]);
+    const nvidiaModels = this.splitCsv(process.env.NVIDIA_CHAT_MODELS, [
+      'nvidia/nemotron-3-ultra-550b-a55b',
+      'nvidia/nemotron-3-super-120b-a12b',
+      'nvidia/nemotron-3-nano-30b-a3b',
+    ]);
+    const geminiModels = [
+      'gemini-3.7-flash',
+      'gemini-3.6-flash',
+      'gemini-3.5-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-3-flash',
+    ];
+    const opencodeModels = OPENCODE_ZEN_MODEL_IDS;
+
     const providers = [
       {
-        id: 'nvidia',
-        label: 'NVIDIA NIM',
-        models: this.splitCsv(process.env.NVIDIA_CHAT_MODELS, [
-          'nvidia/nemotron-3-ultra-550b-a55b',
-          'nvidia/nemotron-3-super-120b-a12b',
-          'nvidia/nemotron-3-nano-30b-a3b',
-        ]),
+        id: 'openai',
+        label: 'OpenAI — ChatGPT',
+        tier: 'paid',
+        models: ['gpt-5.6-luna', 'gpt-4o', 'gpt-4o-mini', 'o3', 'o4-mini', 'gpt-3.5-turbo'],
       },
       {
         id: 'openrouter',
         label: 'OpenRouter',
-        models: this.splitCsv(process.env.OPENROUTER_CHAT_MODELS, [
-          'nvidia/nemotron-3-nano-30b-a3b:free',
-          'nvidia/nemotron-3-super-120b-a12b:free',
-          'deepseek/deepseek-v4-flash',
-          'deepseek/deepseek-v4-pro',
-          'z-ai/glm-5.2',
-          'nvidia/nemotron-3-ultra-550b-a55b',
-          'openrouter/free',
-        ]),
+        tier: 'paid',
+        models: openrouterModels,
+        freeModels: openrouterModels.filter(
+          (m) => m.endsWith(':free') || FALLBACK_OMNIROUTE_MODELS.includes(m),
+        ),
+      },
+      { id: 'xai', label: 'xAI — Grok', tier: 'paid', models: ['grok-4.6', 'grok-3', 'grok-3-mini'] },
+      {
+        id: 'nvidia',
+        label: 'NVIDIA NIM',
+        tier: 'paid',
+        models: nvidiaModels,
+        freeModels: nvidiaModels.filter((m) => m.endsWith(':free')),
+      },
+      {
+        id: 'gemini',
+        label: 'Google Gemini',
+        tier: 'key',
+        models: geminiModels,
+        freeModels: geminiModels,
+      },
+      {
+        id: 'opencode',
+        label: 'OpenCode Zen',
+        tier: 'key',
+        models: opencodeModels,
+        freeModels: OPENCODE_ZEN_MODELS.filter((m) => m.isFree).map((m) => m.id),
       },
       {
         id: 'omniroute',
         label: 'OmniRoute (free)',
+        tier: 'keyless',
         models: await this.fetchOmniRouteModels(),
       },
       {
         id: 'ollama',
         label: 'Ollama (local)',
+        tier: 'keyless',
         models: ['qwen3:32b', 'qwen3:8b', 'qwen3:4b'],
       },
     ].filter((p) => p.models.length > 0);
@@ -356,21 +421,37 @@ export class AgentController {
   private async fetchOmniRouteModels(): Promise<string[]> {
     const allowed = new Set(FALLBACK_OMNIROUTE_MODELS);
     const base = (process.env.OMNIROUTE_BASE_URL || 'http://localhost:20128/v1').replace(/\/+$/, '');
-    const key = process.env.OMNIROUTE_API_KEY || 'omniroute';
+    const key = process.env.OMNIROUTE_API_KEY || '';
+    let models: string[] = [];
     try {
       const res = await fetch(`${base}/models`, {
         headers: { authorization: `Bearer ${key}` },
         signal: AbortSignal.timeout(4000),
       });
-      if (!res.ok) return [...allowed];
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { data?: Array<{ id?: string }> };
-      const models = (data.data || [])
+      models = (data.data || [])
         .map((m) => String(m.id || '').trim())
         .filter(Boolean);
-      return models.length > 0 ? models : [...allowed];
     } catch {
+      const ranked = this.omniRouteHealth.getRankedIds();
+      if (ranked.length > 0) return this.sortRanked(ranked);
       return [...allowed];
     }
+    if (models.length === 0) return [...allowed];
+    // Middleware ranking: sort the live catalog by the health snapshot so
+    // available (running) models lead, then fastest, then free.
+    return this.sortRanked(models);
+  }
+
+  private sortRanked(models: string[]): string[] {
+    const rank = new Map<string, number>();
+    this.omniRouteHealth.getRankedIds().forEach((id, i) => rank.set(id, i));
+    return [...models].sort((a, b) => {
+      const ia = rank.get(a) ?? Number.MAX_SAFE_INTEGER;
+      const ib = rank.get(b) ?? Number.MAX_SAFE_INTEGER;
+      return ia - ib;
+    });
   }
 
   /** Content-type for file/asset responses, for the FE to render/download. */
@@ -424,13 +505,27 @@ export class AgentController {
   }
 
   @Get('file/asset')
-  fileAsset(@Query('path') filePath: string) {
+  fileAsset(@Query('path') filePath: string, @Query('probe') probe?: string) {
     if (!filePath) throw new BadRequestException('path is required');
     const resolved = path.resolve(filePath);
     try {
       const stat = fs.statSync(resolved);
       if (stat.isDirectory()) throw new BadRequestException('Path is a directory');
       if (stat.size > 5 * 1024 * 1024) throw new BadRequestException('File too large (>5MB)');
+
+      // Probe mode: lightweight existence + metadata check used by the FileCard
+      // frontend so it can tell the user immediately if a marker points at a
+      // file that doesn't exist, without pulling the entire payload across the wire.
+      if (probe === '1') {
+        return {
+          ok: true,
+          name: path.basename(resolved),
+          path: resolved,
+          mime: this.assetMime(resolved),
+          size: stat.size,
+        };
+      }
+
       const data = fs.readFileSync(resolved);
       return {
         ok: true,

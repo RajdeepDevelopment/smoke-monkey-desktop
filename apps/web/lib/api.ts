@@ -6,6 +6,7 @@ import type {
   MetricsSummaryDto,
   ModelsResponseDto,
   OmniRouteModelsResponseDto,
+  OmniRouteRankedResponseDto,
   OmniRouteStatusDto,
   OnboardingStateDto,
   RetrieveResponseDto,
@@ -22,9 +23,12 @@ import type {
   AgentRunDto,
   AgentEventDto,
   AgentToolDto,
+  McpCreateResultDto,
   McpServersResponseDto,
+  McpStockCatalogResponseDto,
   McpTestResultDto,
   McpOAuthStartResultDto,
+  McpImportResultDto,
   ShareStatusDto,
   ShareConfigDto,
   TunnelStatusDto,
@@ -278,6 +282,29 @@ export function agentAssetToBlob(asset: AgentAsset): Blob {
   return new Blob([bytes], { type: asset.mime || 'application/octet-stream' });
 }
 
+/** Lightweight existence + metadata probe — no base64 payload. */
+export interface AgentAssetProbe {
+  ok: boolean;
+  name: string;
+  path: string;
+  mime: string;
+  size: number;
+}
+
+export async function probeAgentAsset(filePath: string): Promise<AgentAssetProbe> {
+  const token = getToken();
+  const headers: Record<string, string> = {};
+  if (token) headers.authorization = `Bearer ${token}`;
+  const res = await nativeFetch(
+    `${API_URL}/api/agent/file/asset?path=${encodeURIComponent(filePath)}&probe=1`,
+    { headers, credentials: 'include' },
+  );
+  if (!res.ok) throw new ApiError(`Asset probe failed (${res.status})`, res.status);
+  const body = (await res.json()) as Partial<AgentAssetProbe>;
+  if (!body?.ok) throw new Error('Asset not found');
+  return body as AgentAssetProbe;
+}
+
 /** Trigger a client-side download of an agent asset. */
 export function downloadAgentAsset(asset: AgentAsset): void {
   const blob = agentAssetToBlob(asset);
@@ -433,6 +460,7 @@ export const api = {
   // models
   fetchModels: () => request<ModelsResponseDto>('/api/models'),
   fetchOmniRouteModels: () => request<OmniRouteModelsResponseDto>('/api/models/omniroute'),
+  fetchOmniRouteRanked: () => request<OmniRouteRankedResponseDto>('/api/models/omniroute/ranked'),
   fetchOpenRouterModels: () => request<OmniRouteModelsResponseDto>('/api/models/openrouter'),
 
   // OmniRoute provisioning lifecycle (drives the "Initializing OmniRoute…" UI)
@@ -549,15 +577,27 @@ export const api = {
   // ── MCP Servers ──────────────────────────────────────────────────────────
   listMcpServers: () =>
     request<McpServersResponseDto>('/api/mcp'),
-  createMcpServer: (data: { name: string; description?: string; transport?: 'stdio' | 'http'; command: string; args?: string[]; env?: Record<string, string>; url?: string; oauthClientId?: string; oauthClientSecret?: string; oauthScopes?: string }) =>
-    request<{ id: string; name: string }>('/api/mcp', {
+  listMcpStockCatalog: () =>
+    request<McpStockCatalogResponseDto>('/api/mcp/stock'),
+  createMcpServer: (data: { name: string; description?: string; transport?: 'stdio' | 'http'; command: string; args?: string[]; env?: Record<string, string>; url?: string; enabled?: boolean; oauthClientId?: string; oauthClientSecret?: string; oauthScopes?: string; apiToken?: string; icon?: string; category?: string; tags?: string[] }) =>
+    request<McpCreateResultDto>('/api/mcp', {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  updateMcpServer: (id: string, data: { name?: string; description?: string; transport?: 'stdio' | 'http'; command?: string; args?: string[]; env?: Record<string, string>; url?: string; enabled?: boolean; oauthClientId?: string; oauthClientSecret?: string; oauthScopes?: string }) =>
+  createMcpServersBatch: (servers: Array<{ name: string; description?: string; transport?: 'stdio' | 'http'; command?: string; args?: string[]; env?: Record<string, string>; url?: string; enabled?: boolean; oauthClientId?: string; oauthClientSecret?: string; oauthScopes?: string; apiToken?: string; icon?: string; category?: string; tags?: string[] }>) =>
+    request<{ created: Array<{ id: string; name: string; transport: string; needsSetup: boolean }>; skipped: Array<{ name: string; reason: string }> }>('/api/mcp/create-many', {
+      method: 'POST',
+      body: JSON.stringify({ servers }),
+    }),
+  updateMcpServer: (id: string, data: { name?: string; description?: string; transport?: 'stdio' | 'http'; command?: string; args?: string[]; env?: Record<string, string>; url?: string; enabled?: boolean; oauthClientId?: string; oauthClientSecret?: string; oauthScopes?: string; apiToken?: string; icon?: string; category?: string; tags?: string[] }) =>
     request<{ id: string; name: string }>(`/api/mcp/${id}`, {
       method: 'PUT',
       body: JSON.stringify(data),
+    }),
+  importMcpServers: (payload: unknown) =>
+    request<McpImportResultDto>('/api/mcp/import', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
   deleteMcpServer: (id: string) =>
     request<{ status: string }>(`/api/mcp/${id}`, { method: 'DELETE' }),

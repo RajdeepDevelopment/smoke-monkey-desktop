@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import 'highlight.js/styles/github-dark.css';
+import { ExternalLink } from 'lucide-react';
 import { ErrorBoundary } from './ErrorBoundary';
 import { AddonShell } from './visuals/AddonShell';
 import { CodeBlock } from './visuals/CodeBlock';
@@ -14,20 +15,30 @@ import { MermaidDiagram } from './visuals/MermaidDiagram';
 import { StreamingVisual } from './visuals/StreamingVisual';
 import { TableWithExport } from './visuals/TableWithExport';
 import { FileCard, FileCardPlaceholder, FILE_MARKER_RE } from './visuals/FileCard';
+import { CardBlock, CardSkeleton, WidgetCard } from './visuals/CardBlock';
+import type { WidgetHint } from './visuals/CardBlock';
+import { ChartBlock, ChartSkeleton } from './visuals/ChartBlock';
+import type { ChartKind } from './visuals/ChartBlock';
+import { TreeBlock } from './visuals/TreeBlock';
+import { WorkflowBlock } from './visuals/WorkflowBlock';
 import {
   extractProjectName,
   parseFiles,
   parseProjectMetadata,
 } from './visuals/fileUtils';
 import type { FileEntry, ProjectMetadata } from './visuals/fileUtils';
+import { cn } from '../lib/utils';
+import { faviconForUrl } from './BrandIconResolver';
 
 interface MarkdownProps {
   content: string;
   /** Extra react-markdown components merged over the built-in ones. */
   components?: React.ComponentProps<typeof ReactMarkdown>['components'];
+  /** Called when a <file-SM-st> card is clicked (agent workspace uses this). */
+  onFileSelect?: (path: string) => void;
 }
 
-type Segment =
+export type Segment =
   | { kind: 'text'; content: string }
   | { kind: 'mermaid'; code: string }
   | { kind: 'visuals'; code: string }
@@ -37,7 +48,15 @@ type Segment =
   | { kind: 'streamingFiles'; files: FileEntry[]; projectName: string; metadata: ProjectMetadata | null }
   | { kind: 'streamingMeta' }
   | { kind: 'file'; path: string }
-  | { kind: 'streaming-file' };
+  | { kind: 'streaming-file' }
+  | { kind: 'card'; json: string }
+  | { kind: 'streaming-card' }
+  | { kind: 'chart'; sub: ChartKind; json: string }
+  | { kind: 'tree'; json: string }
+  | { kind: 'workflow'; json: string }
+  | { kind: 'widget'; hint: WidgetHint; json: string }
+  | { kind: 'widget-mermaid'; code: string }
+  | { kind: 'streaming-widget'; widget: 'chart' | 'card' };
 
 /**
  * Add-on extraction pattern, ported from RDS-Power-AI's MarkdownRenderer.
@@ -66,6 +85,48 @@ const OPEN_FENCE_RE = /```mermaid[ \t]*\r?\n([\s\S]*)$/;
 const VISUALS_RE = /RDS-Visuals-st[ \t]*\r?\n?([\s\S]*?)[ \t]*\r?\n?RDS-Visuals-ed/g;
 const FILES_RE = /File-Based-st[ \t]*\r?\n?([\s\S]*?)[ \t]*\r?\n?File-Based-ed/g;
 const METADATA_RE = /Project-Metadata-st[ \t]*\r?\n?([\s\S]*?)[ \t]*\r?\n?Project-Metadata-ed/g;
+/** Close-tag variants the LLM may emit for a marker pair: <end>, </start>, </end>.
+ *  Models often close XML-style (<card-st>…</card-st>) instead of the canonical
+ *  <card-ed>, so the parser accepts every spelling (plus optional inner spaces). */
+function closeTagRe(start: string, end: string): RegExp {
+  return new RegExp(`<\\s*/?\\s*(?:${end}|${start})\\s*>`);
+}
+
+const CARD_RE =
+  /<card-st>[ \t]*\r?\n?([\s\S]*?)[ \t]*\r?\n?<\s*\/?\s*(?:card-ed|card-st)\s*>/g;
+
+/** Dedicated JSON widgets wrapped in their own marker pairs. */
+interface WidgetDef {
+  start: string;
+  end: string;
+  kind: 'chart' | 'tree' | 'workflow' | 'widget' | 'widget-mermaid';
+  sub?: ChartKind;
+  hint?: WidgetHint;
+}
+
+const WIDGET_DEFS: WidgetDef[] = [
+  { start: 'bar-chart-st', end: 'bar-chart-ed', kind: 'chart', sub: 'bar' },
+  { start: 'line-chart-st', end: 'line-chart-ed', kind: 'chart', sub: 'line' },
+  { start: 'pie-chart-st', end: 'pie-chart-ed', kind: 'chart', sub: 'pie' },
+  { start: 'scatter-chart-st', end: 'scatter-chart-ed', kind: 'chart', sub: 'scatter' },
+  { start: 'tree-st', end: 'tree-ed', kind: 'tree' },
+  { start: 'workflow-st', end: 'workflow-ed', kind: 'workflow' },
+  { start: 'mermaid-st', end: 'mermaid-ed', kind: 'widget-mermaid' },
+  { start: 'timeline-st', end: 'timeline-ed', kind: 'widget', hint: 'timeline' },
+  { start: 'progress-st', end: 'progress-ed', kind: 'widget', hint: 'progress' },
+  { start: 'status-st', end: 'status-ed', kind: 'widget', hint: 'status' },
+  { start: 'alert-st', end: 'alert-ed', kind: 'widget', hint: 'alert' },
+  { start: 'callout-st', end: 'callout-ed', kind: 'widget', hint: 'callout' },
+];
+
+function widgetRe(def: WidgetDef): RegExp {
+  return new RegExp(
+    `<${def.start}>[ \\t]*\\r?\\n?([\\s\\S]*?)[ \\t]*\\r?\\n?<\\s*/?\\s*(?:${def.end}|${def.start})\\s*>`,
+    'g',
+  );
+}
+
+const WIDGET_MARKER_TAGS: string[] = WIDGET_DEFS.flatMap((d) => [d.start, d.end]);
 
 const MARKERS = [
   'RDS-Visuals-st',
@@ -78,6 +139,9 @@ const MARKERS = [
   'file-sm-ed',
   'pdf-SM-st',
   'pdf-sm-ed',
+  'card-st',
+  'card-ed',
+  ...WIDGET_MARKER_TAGS,
 ];
 
 /** LLMs sometimes wrap marker blocks in a code fence — strip those fences so
@@ -103,8 +167,9 @@ function lastUnclosed(text: string, start: string, end: string, boundary?: (afte
 }
 
 interface OpenTail {
-  kind: 'visuals' | 'files' | 'metadata' | 'mermaid' | 'file';
+  kind: 'visuals' | 'files' | 'metadata' | 'mermaid' | 'file' | 'card' | 'widget';
   index: number;
+  def?: WidgetDef;
 }
 
 /** True when the last <file-SM-st> open tag has no matching close yet. */
@@ -117,6 +182,45 @@ function lastUnclosedFile(text: string): number {
   const after = text.slice(last);
   const closeRe = /<(?:pdf|file)-sm-ed\s*>/gi;
   return closeRe.test(after) ? -1 : last;
+}
+
+/** True when a complete <start> block appears before `atIndex` with no close yet. */
+function hasUnclosedOpenBefore(text: string, atIndex: number, start: string, end: string): boolean {
+  const open = '<' + start + '>';
+  const closed = closeTagRe(start, end);
+  let o = text.indexOf(open);
+  while (o !== -1 && o < atIndex) {
+    if (!text.slice(o + open.length).match(closed)) return true;
+    o = text.indexOf(open, o + 1);
+  }
+  return false;
+}
+
+/**
+ * Find the last still-streaming <…> robot block (card/widget markers). Returns
+ * the index of the opening "<" so the opening bracket is never left in the
+ * rendered text; a streaming tag name ("<bar-ch…) is treated as a tail
+ * immediately (no raw prefix flash), and a streaming close tag ("<card-ed"
+ * without ">") keeps the skeleton until it lands (no raw JSON flash). Close
+ * tags written either canonically (<card-ed>) or XML-style (</card-st>) are
+ * both recognized as closed.
+ */
+function lastStreamingOpen(text: string, start: string, end: string): number {
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (text[i] !== '<') continue;
+    const after = text.slice(i + 1);
+    if (after[0] === '/') continue; // a close tag can never be an opening tail
+    if (after.startsWith(start)) {
+      const rest = after.slice(start.length);
+      if (rest[0] === '>' && closeTagRe(start, end).test(after)) continue;
+      return i;
+    }
+    if (after.length > 0 && start.startsWith(after)) {
+      const realOpen = hasUnclosedOpenBefore(text, i, start, end);
+      if (!realOpen) return i;
+    }
+  }
+  return -1;
 }
 
 /** Find the first (earliest) marker block that is still streaming. */
@@ -137,6 +241,14 @@ function detectTail(normalized: string): OpenTail | null {
 
   const file = lastUnclosedFile(normalized);
   if (file !== -1) candidates.push({ kind: 'file', index: file });
+
+  const card = lastStreamingOpen(normalized, 'card-st', 'card-ed');
+  if (card !== -1) candidates.push({ kind: 'card', index: card });
+
+  for (const def of WIDGET_DEFS) {
+    const i = lastStreamingOpen(normalized, def.start, def.end);
+    if (i !== -1) candidates.push({ kind: 'widget', index: i, def });
+  }
 
   if (candidates.length === 0) return null;
   candidates.sort((a, b) => a.index - b.index);
@@ -166,6 +278,12 @@ function buildTail(
   }
   if (open.kind === 'metadata') return { kind: 'streamingMeta' };
   if (open.kind === 'file') return { kind: 'streaming-file' };
+  if (open.kind === 'card') return { kind: 'streaming-card' };
+  if (open.kind === 'widget' && open.def) {
+    if (open.def.kind === 'chart') return { kind: 'streaming-widget', widget: 'chart' };
+    if (open.def.kind === 'widget-mermaid') return { kind: 'streaming', lang: 'mermaid' };
+    return { kind: 'streaming-widget', widget: 'card' };
+  }
   return { kind: 'streaming', lang: 'mermaid' };
 }
 
@@ -177,6 +295,47 @@ function splitMermaidTail(text: string): Segment[] {
   if (m.index > 0) out.push({ kind: 'text', content: text.slice(0, m.index) });
   out.push({ kind: 'streaming', lang: 'mermaid' });
   return out;
+}
+
+/**
+ * If a marker block reaches the end of the message with a broken/missing close
+ * tag but its body is ALREADY a complete widget, render it now instead of
+ * showing a streaming skeleton forever (a common LLM truncation edge case).
+ * During live streaming the body is usually still partial, so JSON.parse
+ * keeps failing and the skeleton stays exactly as intended.
+ */
+function tryFinalizeTail(normalized: string, open: OpenTail): Segment | null {
+  const start = open.def ? open.def.start : 'card-st';
+  const end = open.def ? open.def.end : 'card-ed';
+  const openTag = '<' + start + '>';
+  if (!normalized.startsWith(openTag, open.index)) return null;
+  let content = normalized.slice(open.index + openTag.length);
+  content = content
+    .replace(/^[ \t]*\r?\n?/, '')
+    .replace(/[ \t]*\r?\n?$/, '')
+    .replace(/<\s*\/?\s*[a-zA-Z0-9-]+\s*>\s*$/, '');
+  try {
+    JSON.parse(content);
+  } catch {
+    return null;
+  }
+  if (open.def) {
+    switch (open.def.kind) {
+      case 'chart':
+        if (open.def.sub === undefined) return null;
+        return { kind: 'chart', sub: open.def.sub, json: content };
+      case 'tree':
+        return { kind: 'tree', json: content };
+      case 'workflow':
+        return { kind: 'workflow', json: content };
+      case 'widget-mermaid':
+        return { kind: 'widget-mermaid', code: content };
+      case 'widget':
+        if (open.def.hint === undefined) return null;
+        return { kind: 'widget', hint: open.def.hint, json: content };
+    }
+  }
+  return { kind: 'card', json: content };
 }
 
 /** Segment complete (closed) blocks, stripping + parsing Project-Metadata. */
@@ -232,6 +391,34 @@ function segmentMain(main: string): { segments: Segment[]; metadata: ProjectMeta
       if (!path) return null;
       return { seg: { kind: 'file', path }, end: m.index + m[0].length };
     });
+    scan(CARD_RE, (m) => {
+      const json = (m[1] ?? '').trim();
+      if (!json) return null;
+      return { seg: { kind: 'card', json }, end: m.index + m[0].length };
+    });
+
+    for (const def of WIDGET_DEFS) {
+      scan(widgetRe(def), (m) => {
+        const json = (m[1] ?? '').trim();
+        const end = m.index + m[0].length;
+        switch (def.kind) {
+          case 'chart':
+            if (!json || def.sub === undefined) return null;
+            return { seg: { kind: 'chart', sub: def.sub, json }, end };
+          case 'tree':
+            if (!json) return null;
+            return { seg: { kind: 'tree', json }, end };
+          case 'workflow':
+            if (!json) return null;
+            return { seg: { kind: 'workflow', json }, end };
+          case 'widget-mermaid':
+            return { seg: { kind: 'widget-mermaid', code: json }, end };
+          case 'widget':
+            if (!json || def.hint === undefined) return null;
+            return { seg: { kind: 'widget', hint: def.hint, json }, end };
+        }
+      });
+    }
 
     return best;
   };
@@ -255,14 +442,29 @@ function segmentMain(main: string): { segments: Segment[]; metadata: ProjectMeta
   return { segments, metadata };
 }
 
-function splitAddons(content: string): Segment[] {
-  const normalized = stripMarkerFences(content);
+/** Strip Smoke Monkey inline ask_user blocks. These are real tool-call
+ *  invocations that get parsed into popup dialogs server-side, but when the
+ *  model streams them as raw text the block flashes in the chat UI. Closing
+ *  tags are matched; an unclosed opening tag (still mid-stream) is also removed
+ *  so nothing appears before the popup arrives. */
+function stripAskUserBlocks(text: string): string {
+  return text
+    .replace(/<ask_user\s*>[\s\S]*?<\/ask_user\s*>/gi, '')
+    .replace(/<ask_user[ \t]*>[\s\S]*$/gi, '');
+}
+
+export function splitAddons(content: string): Segment[] {
+  const normalized = stripAskUserBlocks(stripMarkerFences(content));
   const tail = detectTail(normalized);
   const main = tail ? normalized.slice(0, tail.index) : normalized;
   const { segments, metadata } = segmentMain(main);
   if (tail) {
-    const tailSeg = buildTail(normalized, tail, metadata);
-    if (tailSeg) segments.push(tailSeg);
+    const finalized = tryFinalizeTail(normalized, tail);
+    if (finalized) segments.push(finalized);
+    else {
+      const tailSeg = buildTail(normalized, tail, metadata);
+      if (tailSeg) segments.push(tailSeg);
+    }
   }
   if (segments.length === 0 && !tail) segments.push({ kind: 'text', content: normalized });
   return segments;
@@ -285,7 +487,7 @@ function StreamingMetaAddon() {
   );
 }
 
-function MarkdownBody({ content, components }: MarkdownProps) {
+function MarkdownBody({ content, components, onFileSelect }: MarkdownProps) {
   const segments = splitAddons(content);
   return (
     <div className="md-body">
@@ -316,19 +518,59 @@ function MarkdownBody({ content, components }: MarkdownProps) {
           );
         }
         if (seg.kind === 'streamingMeta') return <StreamingMetaAddon key={i} />;
-        if (seg.kind === 'file') return <FileCard key={i} path={seg.path} />;
+        if (seg.kind === 'file') return <FileCard key={i} path={seg.path} onOpenInEditor={onFileSelect} />;
         if (seg.kind === 'streaming-file') return <FileCardPlaceholder key={i} />;
+        if (seg.kind === 'card') return <CardBlock key={i} json={seg.json} />;
+        if (seg.kind === 'streaming-card') return <CardSkeleton key={i} />;
+        if (seg.kind === 'chart') return <ChartBlock key={i} kind={seg.sub} json={seg.json} />;
+        if (seg.kind === 'tree') return <TreeBlock key={i} json={seg.json} />;
+        if (seg.kind === 'workflow') return <WorkflowBlock key={i} json={seg.json} />;
+        if (seg.kind === 'widget') return <WidgetCard key={i} hint={seg.hint} json={seg.json} />;
+        if (seg.kind === 'widget-mermaid') return <MermaidDiagram key={i} code={seg.code} />;
+        if (seg.kind === 'streaming-widget') {
+          return seg.widget === 'chart' ? <ChartSkeleton key={i} /> : <CardSkeleton key={i} />;
+        }
         return (
           <ErrorBoundary key={i}>
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               rehypePlugins={[rehypeHighlight]}
               components={{
-                ...components,
-                pre: ({ children }) => (
-                  <CodeBlock language={getLanguage(children)}>{children}</CodeBlock>
-                ),
-                table: ({ children }) => <TableWithExport>{children}</TableWithExport>,
+                ...(components ?? {}),
+                pre:
+                  components?.pre ??
+                  (({ children }) => (
+                    <CodeBlock language={getLanguage(children)}>{children}</CodeBlock>
+                  )),
+                table:
+                  components?.table ??
+                  (({ children }) => <TableWithExport>{children}</TableWithExport>),
+                a:
+                  components?.a ??
+                  (({ href, children }) => {
+                    if (!href) return <a>{children}</a>;
+                    if (/^https?:\/\//i.test(href)) {
+                      const fav = faviconForUrl(href);
+                      if (fav) {
+                        const FavIcon = fav.Icon;
+                        return (
+                          <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1">
+                            <span className={cn('shrink-0 leading-none', fav.color)}>
+                              <FavIcon className="h-3.5 w-3.5 fill-current" />
+                            </span>
+                            {children}
+                          </a>
+                        );
+                      }
+                      return (
+                        <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1">
+                          <ExternalLink className="h-3 w-3 shrink-0 text-ink-muted/60" />
+                          {children}
+                        </a>
+                      );
+                    }
+                    return <a href={href}>{children}</a>;
+                  }),
               }}
             >
               {seg.content}
@@ -356,6 +598,6 @@ function getLanguage(children: unknown): string {
  * File-Based project explorers). Memoized so only the streaming message
  * re-renders on token updates.
  */
-export const Markdown = memo(function Markdown({ content, components }: MarkdownProps) {
-  return <MarkdownBody content={content} components={components} />;
+export const Markdown = memo(function Markdown({ content, components, onFileSelect }: MarkdownProps) {
+  return <MarkdownBody content={content} components={components} onFileSelect={onFileSelect} />;
 });

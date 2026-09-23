@@ -68,6 +68,11 @@ export class McpServer {
   @Column({ type: 'text', nullable: true })
   oauthAccessToken: string | null;
 
+  /** Personal access token / API key (http servers without OAuth or DCR, e.g.
+   *  mcp.render.com). Sent as `Authorization: Bearer`, bypasses OAuth. */
+  @Column({ type: 'text', nullable: true })
+  apiToken: string | null;
+
   /** OAuth refresh token (http servers). */
   @Column({ type: 'text', nullable: true })
   oauthRefreshToken: string | null;
@@ -79,6 +84,21 @@ export class McpServer {
   /** Whether this server is eligible for the agent to connect during runs. */
   @Column({ default: true })
   enabled: boolean;
+
+  /** Optional brand hint or emoji the LLM/user assigned for UI display. */
+  @Column({ length: 64, nullable: true })
+  icon: string | null;
+
+  /** Stock category this server belongs to (from the stock catalog when added
+   *  via the UI, or user-picked for manual adds). Used for category-wise search
+   *  and for the category filter in inspect_mcp_stock. */
+  @Column({ type: 'text', nullable: true })
+  category: string | null;
+
+  /** Search tags (aliases/keywords) so the agent can find this server when the
+   *  task uses different words than its name/description. Stored as JSON. */
+  @Column({ type: 'simple-json', nullable: true })
+  tags: string[] | null;
 
   @CreateDateColumn()
   createdAt: Date;

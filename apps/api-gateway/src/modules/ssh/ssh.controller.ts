@@ -160,9 +160,12 @@ export class SshController {
   }
 
   @Get('git-status')
-  async gitStatusRemote(@Req() req: any, @Query('id') id?: string, @Query('path') remotePath?: string) {
+  async gitStatusRemote(@Req() req: any, @Query('id') id?: string, @Query('path') remotePath?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
     if (!id) throw new BadRequestException('id required');
-    return this.ssh.gitStatusRemote(id, userIdOf(req), remotePath || '~');
+    const opts: { limit?: number; offset?: number } = {};
+    if (limit !== undefined) opts.limit = Math.max(1, parseInt(limit, 10) || 1);
+    if (offset !== undefined) opts.offset = Math.max(0, parseInt(offset, 10) || 0);
+    return this.ssh.gitStatusRemote(id, userIdOf(req), remotePath || '~', opts);
   }
 
   @Get('read')

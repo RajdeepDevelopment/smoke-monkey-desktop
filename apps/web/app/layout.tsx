@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next';
 import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.scss';
+import '@xyflow/react/dist/style.css';
 import { AuthProvider } from '../components/AuthProvider';
 import { AppShell } from '../components/AppShell';
 import { ToastProvider } from '../components/Toast';

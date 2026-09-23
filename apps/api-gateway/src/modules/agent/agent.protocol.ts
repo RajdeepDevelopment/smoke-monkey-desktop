@@ -31,7 +31,7 @@ export interface AgentSession {
   id: string;
   userId: string;
   agentId: string;
-  status: 'idle' | 'running' | 'waiting_permission' | 'waiting_user_input' | 'interrupted' | 'completed' | 'failed';
+  status: 'idle' | 'running' | 'waiting_permission' | 'waiting_user_input' | 'waiting_mcp_approval' | 'interrupted' | 'completed' | 'failed';
   workspacePath?: string;
   title?: string;
   messageCount: number;

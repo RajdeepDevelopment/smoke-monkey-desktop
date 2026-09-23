@@ -1,4 +1,5 @@
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsIn,
@@ -8,7 +9,9 @@ import {
   IsUrl,
   Length,
   MaxLength,
+  ValidateNested,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class CreateMcpServerDto {
   @IsString()
@@ -54,8 +57,31 @@ export class CreateMcpServerDto {
   oauthScopes?: string;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  /** Personal access token / API key, sent as `Authorization: Bearer` for
+   *  http servers that don't support OAuth dynamic client registration. */
+  apiToken?: string;
+
+  @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(64)
+  icon?: string;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(120)
+  category?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @MaxLength(40, { each: true })
+  tags?: string[];
 }
 
 export class UpdateMcpServerDto {
@@ -102,6 +128,37 @@ export class UpdateMcpServerDto {
   oauthScopes?: string;
 
   @IsOptional()
+  @IsString()
+  @MaxLength(2048)
+  apiToken?: string;
+
+  @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(64)
+  icon?: string;
+
+  @IsString()
+  @IsOptional()
+  @MaxLength(120)
+  category?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @MaxLength(40, { each: true })
+  tags?: string[];
+}
+
+export const MCP_BATCH_MAX = 8;
+
+export class CreateManyMcpServersDto {
+  @IsArray()
+  @ArrayMaxSize(MCP_BATCH_MAX)
+  @ValidateNested({ each: true })
+  @Type(() => CreateMcpServerDto)
+  servers: CreateMcpServerDto[];
 }

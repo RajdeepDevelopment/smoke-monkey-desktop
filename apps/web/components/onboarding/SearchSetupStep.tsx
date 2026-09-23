@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Globe, Check, Loader2, Search } from 'lucide-react';
 import { api } from '../../lib/api';
+import { Switch } from '../ui/switch';
 
 const SEARCH_PROVIDERS = [
   { id: 'tavily', label: 'Tavily', placeholder: 'tvly-…' },
@@ -70,22 +71,15 @@ export function SearchSetupStep() {
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={enabled}
-            onClick={() => void toggle(!enabled)}
-            disabled={!serverEnabled || busy}
-            className={`relative h-6 w-11 shrink-0 rounded-full transition-colors duration-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:opacity-40 ${
-              enabled ? 'bg-accent' : 'bg-surface-700'
-            }`}
-          >
-            <span
-              className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform duration-300 ${
-                enabled ? 'translate-x-[22px]' : 'translate-x-0.5'
-              }`}
+          <div className="flex items-center gap-2">
+            {busy && <Loader2 className="h-4 w-4 animate-spin text-ink-muted" />}
+            <Switch
+              checked={enabled}
+              disabled={!serverEnabled || busy}
+              onCheckedChange={(v) => void toggle(v)}
+              aria-label="Toggle live web search"
             />
-          </button>
+          </div>
         </div>
       </div>
 

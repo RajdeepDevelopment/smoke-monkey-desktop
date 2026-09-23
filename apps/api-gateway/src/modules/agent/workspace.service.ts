@@ -14,6 +14,11 @@ const IGNORE_DIRS = new Set([
 ]);
 const IGNORE_FILES = new Set(['.DS_Store']);
 
+/** File-tree-only ignore set: node_modules is *kept visible* in the explorer so
+ *  the tree mirrors git changes, but it stays excluded from search/indexing
+ *  (which use IGNORE_DIRS / SEARCH_EXCLUDE_DIRS for performance). */
+const TREE_IGNORE_DIRS = new Set([...IGNORE_DIRS].filter((d) => d !== 'node_modules'));
+
 /** Directories that must never be scanned by search (with or without .gitignore). */
 export const SEARCH_EXCLUDE_DIRS = [
   'node_modules', '.git', 'dist', 'build', '.next', 'target', 'coverage',
@@ -41,6 +46,8 @@ export interface GitStatusResult {
   branch?: string;
   ahead?: number;
   behind?: number;
+  /** Total number of change entries (the entries array may be a page). */
+  total: number;
   entries: GitStatusEntry[];
 }
 
@@ -95,7 +102,7 @@ export class WorkspaceService {
       return [];
     }
     const filtered = entries.filter((e) => {
-      if (e.isDirectory()) return !IGNORE_DIRS.has(e.name) && !e.name.startsWith('.');
+      if (e.isDirectory()) return !TREE_IGNORE_DIRS.has(e.name);
       if (e.isFile()) return !IGNORE_FILES.has(e.name);
       return false;
     });
@@ -229,14 +236,17 @@ export class WorkspaceService {
       (await this.gitTry(cwd, ['rev-parse', '--is-inside-work-tree'])) === 'true';
   }
 
-  async gitStatus(cwd: string): Promise<GitStatusResult> {
+  async gitStatus(
+    cwd: string,
+    opts?: { limit?: number; offset?: number },
+  ): Promise<GitStatusResult> {
     const isRepo = await this.isGitRepo(cwd);
-    if (!isRepo) return { isRepo: false, entries: [] };
+    if (!isRepo) return { isRepo: false, entries: [], total: 0 };
 
     const [branch, aheadBehind, status] = await Promise.all([
       this.gitTry(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']),
       this.gitTry(cwd, ['rev-parse', '--left-right', '--count', 'HEAD...@{upstream}']),
-      this.gitTry(cwd, ['status', '--porcelain=v1']),
+      this.gitTry(cwd, ['status', '--porcelain=v1', '--untracked-files=all']),
     ]);
 
     const entries: GitStatusEntry[] = [];
@@ -274,12 +284,22 @@ export class WorkspaceService {
       if (!Number.isNaN(r)) behind = r;
     }
 
+    // Paginate when the caller asks for a window; the SCM panel lazily fetches
+    // more on scroll so tens of thousands of untracked files never blow up the
+    // response body or overflow the FE.
+    const total = entries.length;
+    const scope = opts?.limit != null;
+    const start = scope ? (opts.offset ?? 0) : 0;
+    const end = scope ? start + Math.max(opts.limit ?? 0, 1) : entries.length;
+    const page = scope ? entries.slice(start, end) : entries;
+
     return {
       isRepo: true,
       branch: branch ? branch.trim() : undefined,
       ahead,
       behind,
-      entries,
+      total,
+      entries: page,
     };
   }
 
@@ -294,20 +314,125 @@ export class WorkspaceService {
     };
   }
 
-  async gitStage(cwd: string, files: string[], unstage = false): Promise<void> {
-    if (unstage) {
-      await this.git(cwd, ['reset', 'HEAD', '--', ...files]);
+  async gitStage(cwd: string, files: string[], unstage = false, all = false): Promise<void> {
+    let res: { ok: boolean; output?: string; error?: string };
+    if (all && !unstage) {
+      res = await this.gitOperation(cwd, ['add', '-A']);
+    } else if (all && unstage) {
+      // Unstage everything without touching the worktree.
+      res = await this.gitOperation(cwd, ['reset', 'HEAD']);
+      if (!res.ok) {
+        // Fresh repos have no HEAD → `git reset` fails. Fall back to staging-area removal.
+        res = await this.gitOperation(cwd, ['rm', '--cached', '-r', '--', '.']);
+      }
+    } else if (unstage) {
+      res = await this.gitOperation(cwd, ['reset', 'HEAD', '--', ...files]);
+      if (!res.ok) {
+        // Fresh repos have no HEAD → `git reset` fails. Fall back to staging-area removal.
+        res = await this.gitOperation(cwd, ['rm', '--cached', '-r', '--', ...files]);
+      }
     } else {
-      await this.git(cwd, ['add', '--', ...files]);
+      res = await this.gitOperation(cwd, ['add', '--', ...files]);
     }
+    if (!res.ok) throw new Error(res.error || 'git operation failed');
   }
 
   async gitDiscard(cwd: string, file: string, untracked: boolean): Promise<void> {
     if (untracked) {
-      await fsp.rm(`${cwd}/${file}`, { force: true });
+      await fsp.rm(`${cwd}/${file}`, { recursive: true, force: true });
     } else {
       await this.git(cwd, ['checkout', 'HEAD', '--', file]);
     }
+  }
+
+  // ── Git operations (source-control sidebar) ─────────────────────────────
+
+  /** Run a write-side git command and wrap the outcome so the UI can render
+   *  failures inline instead of relying on an HTTP error status. */
+  private async gitOperation(cwd: string, args: string[]): Promise<{ ok: boolean; output?: string; error?: string }> {
+    try {
+      const out = await this.git(cwd, args);
+      return { ok: true, output: out || 'ok' };
+    } catch (err: any) {
+      const detail = String(err?.stderr || err?.stdout || err?.message || 'git command failed').trim();
+      return { ok: false, error: detail.slice(0, 500) };
+    }
+  }
+
+  async gitInit(cwd: string): Promise<{ ok: boolean; output?: string; error?: string }> {
+    return this.gitOperation(cwd, ['init']);
+  }
+
+  async gitCommit(cwd: string, message: string, stageAll = false): Promise<{ ok: boolean; output?: string; error?: string }> {
+    if (stageAll) {
+      const add = await this.gitOperation(cwd, ['add', '-A']);
+      if (!add.ok) return add;
+    } else {
+      // `git diff --cached --quiet` exits 0 = nothing staged, non-zero = staged changes.
+      const staged = await this.gitTry(cwd, ['diff', '--cached', '--quiet']);
+      if (staged === '') {
+        return { ok: false, error: 'No staged changes to commit. Stage files first, or commit with "Stage all" enabled.' };
+      }
+    }
+    const msg = (message || '').trim();
+    if (!msg) return { ok: false, error: 'Commit message is empty.' };
+    return this.gitOperation(cwd, ['commit', '-m', msg]);
+  }
+
+  async gitFetch(cwd: string): Promise<{ ok: boolean; output?: string; error?: string }> {
+    return this.gitOperation(cwd, ['fetch', '--all', '--prune']);
+  }
+
+  async gitPull(cwd: string): Promise<{ ok: boolean; output?: string; error?: string }> {
+    return this.gitOperation(cwd, ['pull']);
+  }
+
+  async gitPush(cwd: string, setUpstream = false): Promise<{ ok: boolean; output?: string; error?: string }> {
+    const branch = (await this.gitTry(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']))?.trim();
+    const args = ['push'];
+    if (setUpstream && branch && branch !== 'HEAD') args.push('-u', 'origin', branch);
+    return this.gitOperation(cwd, args);
+  }
+
+  async gitStashList(cwd: string): Promise<string[]> {
+    const out = (await this.gitTry(cwd, ['stash', 'list'])) || '';
+    return out.split('\n').filter(Boolean);
+  }
+
+  async gitStashPush(cwd: string, message?: string): Promise<{ ok: boolean; output?: string; error?: string }> {
+    const msg = (message || '').trim();
+    return this.gitOperation(cwd, msg ? ['stash', 'push', '-m', msg] : ['stash', 'push']);
+  }
+
+  async gitStashApply(cwd: string, name?: string): Promise<{ ok: boolean; output?: string; error?: string }> {
+    return this.gitOperation(cwd, name ? ['stash', 'apply', name] : ['stash', 'apply']);
+  }
+
+  async gitStashPop(cwd: string, name?: string): Promise<{ ok: boolean; output?: string; error?: string }> {
+    return this.gitOperation(cwd, name ? ['stash', 'pop', name] : ['stash', 'pop']);
+  }
+
+  async gitStashDrop(cwd: string, name: string): Promise<{ ok: boolean; output?: string; error?: string }> {
+    return this.gitOperation(cwd, ['stash', 'drop', name]);
+  }
+
+  async gitBranches(cwd: string): Promise<string[]> {
+    const out = (await this.gitTry(cwd, ['for-each-ref', '--format=%(refname:short)', 'refs/heads'])) || '';
+    return out.split('\n').filter(Boolean);
+  }
+
+  async gitCreateBranch(cwd: string, name: string): Promise<{ ok: boolean; output?: string; error?: string }> {
+    if (!/^[A-Za-z0-9._\/-]+$/.test(name)) {
+      return { ok: false, error: 'Invalid branch name.' };
+    }
+    return this.gitOperation(cwd, ['checkout', '-b', name]);
+  }
+
+  async gitSwitchBranch(cwd: string, name: string): Promise<{ ok: boolean; output?: string; error?: string }> {
+    if (!/^[A-Za-z0-9._\/-]+$/.test(name)) {
+      return { ok: false, error: 'Invalid branch name.' };
+    }
+    return this.gitOperation(cwd, ['checkout', name]);
   }
 
   // ── Search ───────────────────────────────────────────────────────────────

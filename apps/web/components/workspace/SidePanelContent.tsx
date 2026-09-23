@@ -6,6 +6,7 @@ import {
   ChevronDown, ChevronRight, Shield, Terminal as TerminalIcon,
   PanelBottom, RefreshCw, FolderDown, GitCompare,
   FileSearch, TextSearch, Loader2, Sparkles,
+  FilePlus2, FolderPlus, Minus,
 } from 'lucide-react';
 import type { AgentSession, ChatSearchResult } from '../../lib/agent-api';
 import { agentApi } from '../../lib/agent-api';
@@ -49,6 +50,12 @@ interface SidePanelContentProps {
   gitStatus: GitStatusResult | null;
   gitLoading: boolean;
   onRefreshGit: () => void;
+  /** Fetch the next page of git changes (infinite scroll). */
+  onLoadMoreGit?: () => void;
+  /** True while the next git changes page is being fetched. */
+  gitMoreLoading?: boolean;
+  /** True when there are more git changes to load. */
+  gitHasMore?: boolean;
 
   // Search
   onSearchResultOpen: (path: string, line?: number) => void;
@@ -87,11 +94,11 @@ function StatusDot({ status }: { status: string }) {
   return <span className={cn('h-1.5 w-1.5 rounded-full shrink-0', colors[status] || 'bg-zinc-500')} />;
 }
 
-function PanelHeader({ title, children }: { title: string; children?: React.ReactNode }) {
+function PanelHeader({ title, children }: { title: React.ReactNode; children?: React.ReactNode }) {
   return (
-    <div className="glass-border-bottom flex h-9 shrink-0 items-center justify-between px-3">
-      <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">{title}</span>
-      <div className="flex items-center gap-1">{children}</div>
+    <div className="glass-border-bottom flex h-9 shrink-0 items-center justify-between gap-2 px-3">
+      <span className="min-w-0 truncate text-[11px] font-semibold uppercase tracking-wider text-ink-muted">{title}</span>
+      <div className="flex shrink-0 items-center gap-1">{children}</div>
     </div>
   );
 }
@@ -161,6 +168,9 @@ export function SidePanelContent({
   gitStatus,
   gitLoading,
   onRefreshGit,
+  onLoadMoreGit,
+  gitMoreLoading,
+  gitHasMore,
   onSearchResultOpen,
   onOpenGitDiff,
   onModelChange,
@@ -179,6 +189,9 @@ export function SidePanelContent({
   const [chatSearching, setChatSearching] = useState(false);
   const chatDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestChatQueryRef = useRef('');
+  // Toolbar-driven explorer actions (VS Code-style header buttons).
+  const [createSignal, setCreateSignal] = useState<{ nonce: number; type: 'file' | 'directory' } | null>(null);
+  const [collapseSignal, setCollapseSignal] = useState<{ nonce: number } | null>(null);
 
   const runChatSearch = useCallback(async (q: string) => {
     if (!q.trim()) {
@@ -273,7 +286,30 @@ export function SidePanelContent({
       {/* ── Explorer ─────────────────────────────────────────────── */}
       {state.activePanel === 'explorer' && (
         <>
-          <PanelHeader title={`Explorer${workspacePath ? `: ${workspacePath.split('/').pop()}` : ''}`}>
+          <PanelHeader
+            title={
+              <span className="flex min-w-0 items-baseline gap-1">
+                <span className="shrink-0">Explorer</span>
+                {workspacePath && (
+                  <>
+                    <span className="text-ink-muted/40">:</span>
+                    <span
+                      className="min-w-0 max-w-[150px] truncate font-semibold normal-case text-ink-secondary"
+                      title={workspacePath}
+                    >
+                      {workspacePath.split('/').pop()}
+                    </span>
+                  </>
+                )}
+              </span>
+            }
+          >
+            <button onClick={() => setCreateSignal({ nonce: Date.now(), type: 'file' })} className="glass-hover rounded p-1 text-ink-muted transition-colors hover:text-foreground" title="New File">
+              <FilePlus2 className="h-3 w-3" />
+            </button>
+            <button onClick={() => setCreateSignal({ nonce: Date.now(), type: 'directory' })} className="glass-hover rounded p-1 text-ink-muted transition-colors hover:text-foreground" title="New Folder">
+              <FolderPlus className="h-3 w-3" />
+            </button>
             <button onClick={onRefreshFileTree} className="glass-hover rounded p-1 text-ink-muted transition-colors hover:text-foreground" title="Refresh Explorer">
               <RefreshCw className={cn('h-3 w-3', fileTreeLoading && 'animate-spin')} />
             </button>
@@ -282,6 +318,9 @@ export function SidePanelContent({
                 <FolderDown className="h-3 w-3" />
               </button>
             )}
+            <button onClick={() => setCollapseSignal({ nonce: Date.now() })} className="glass-hover rounded p-1 text-ink-muted transition-colors hover:text-foreground" title="Collapse Folders">
+              <Minus className="h-3 w-3" />
+            </button>
           </PanelHeader>
           <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
             <FileExplorer
@@ -296,6 +335,8 @@ export function SidePanelContent({
               onRefresh={onRefreshFileTree}
               loading={fileTreeLoading}
               client={client}
+              createSignal={createSignal}
+              collapseSignal={collapseSignal}
               className="py-1"
             />
           </div>
@@ -322,7 +363,12 @@ export function SidePanelContent({
               status={gitStatus}
               loading={gitLoading}
               onRefresh={onRefreshGit}
+              onLoadMore={onLoadMoreGit}
+              loadingMore={gitMoreLoading}
+              hasMore={gitHasMore}
               onOpenDiff={(relPath) => onOpenGitDiff(relPath)}
+              model={selectedModel}
+              provider={selectedProvider}
             />
           </div>
         </>

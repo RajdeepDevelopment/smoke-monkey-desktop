@@ -36,8 +36,26 @@ export function getContextManageTool(): ToolDefinition {
       'for the current work. Use it at SESSION START to pick the initial set ' +
       `(min 0, max ${MAX_ACTIVE_CONTEXTS}) based on the user's request, and DURING the run to open ` +
       'guidance a step needs or close guidance it no longer needs. ' +
-      'ACTIONS: "activate" (open a sub-context; give contextId) | ' +
-      '"deactivate" (close one, freeing its slot; give contextId) | ' +
+      'The SUB-CONTEXT PANEL in the system message always shows you the CURRENT ' +
+      `ACTIVE [0/${MAX_ACTIVE_CONTEXTS}]` +
+      ' list — CHECK THAT PANEL FIRST. Do not re-activate sub-contexts that are ' +
+      'already listed as ACTIVE (activating an already-active id is a harmless no-op, ' +
+      'but it wastes a turn). Deactivate sub-contexts the current step no longer uses — ' +
+      'active sub-contexts are loaded into every LLM call and cost tokens. ' +
+      'Sub-contexts persist across runs on the same session: closing one with ' +
+      'deactivate is the only way it is removed. ' +
+      'SET (action="set") is the preferred declarative action: pass setIds and the ' +
+      'manager activates EXACTLY those ids, deactivating everything else in one call — ' +
+      'no manual swap bookkeeping. ' +
+      'BATCH: you may activate OR deactivate MANY contexts in a SINGLE call by ' +
+      'passing contextIds (array) — never send N separate single-id calls. ' +
+      'SWAP (action="swap"): swap multiple old contexts OUT and new ones IN in ' +
+      'one call via deactivateIds / activateIds — use it whenever you hit the ' +
+      `cap (${MAX_ACTIVE_CONTEXTS}) and the current step needs different contexts. ` +
+      'ACTIONS: "set" (exact active set via setIds) | ' +
+      '"activate" (open; contextId string or contextIds array) | ' +
+      '"deactivate" (close one or more; contextId or contextIds) | ' +
+      '"swap" (close deactivateIds and open activateIds in the same call) | ' +
       '"list" (see the current ACTIVE/AVAILABLE panel without changing state). ' +
       `MAX ${MAX_ACTIVE_CONTEXTS} sub-contexts active at once — to open a new one when full, ` +
       'deactivate a no-longer-needed sub-context first (swap). ' +
@@ -47,12 +65,32 @@ export function getContextManageTool(): ToolDefinition {
       properties: {
         action: {
           type: 'string',
-          enum: ['activate', 'deactivate', 'list'],
-          description: 'What to do: open a sub-context, close one, or list state.',
+          enum: ['set', 'activate', 'deactivate', 'swap', 'list'],
+          description: 'What to do: set the exact active set, open sub-contexts, close them, swap a batch, or list state.',
+        },
+        setIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'For action="set": the EXACT list of sub-context ids you want active — everything else is deactivated. Includes mcp_<id> servers.',
         },
         contextId: {
           type: 'string',
-          description: `The sub-context id (e.g. "backend_scale"). Required for activate/deactivate.`,
+          description: 'A single sub-context id (e.g. "backend_scale"). Required for activate/deactivate when contextIds is not given.',
+        },
+        contextIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'One or more sub-context ids to activate or deactivate in the SAME call (e.g. ["backend_scale", "api_contract"]).',
+        },
+        activateIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'For action="swap": the sub-context ids to open (can be empty if you only deactivate).',
+        },
+        deactivateIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'For action="swap": the sub-context ids to close (can be empty if you only activate).',
         },
       },
       required: ['action'],
@@ -74,7 +112,28 @@ export function getContextManageTool(): ToolDefinition {
       }
 
       const action = String(input.action || '');
-      const contextId = String(input.contextId || '').trim();
+      // Normalize ids from a string, array, or JSON-encoded array (models
+      // sometimes stringify contextIds into the singular contextId field).
+      const normIds = (v: unknown): string[] => {
+        const arr = Array.isArray(v) ? (v as unknown[]).map(String) : v ? [String(v)] : [];
+        const out: string[] = [];
+        for (const id of arr) {
+          if (!id) continue;
+          if (id.startsWith('[')) {
+            try {
+              const parsed = JSON.parse(id);
+              if (Array.isArray(parsed)) {
+                out.push(...parsed.map(String).filter(Boolean));
+                continue;
+              }
+            } catch { /* not JSON — keep as-is */ }
+          }
+          out.push(id);
+        }
+        return out;
+      };
+      const fromContextIds = normIds(input.contextIds);
+      const ids = fromContextIds.length > 0 ? fromContextIds : normIds(input.contextId);
 
       if (action === 'list') {
         emitContextState(manager, context);
@@ -86,43 +145,128 @@ export function getContextManageTool(): ToolDefinition {
         };
       }
 
+      if (action === 'set') {
+        const setIds = normIds(input.setIds);
+        if (setIds.length === 0) {
+          return {
+            content: [{ type: 'text', text: 'Error: set needs setIds (an array) listing the EXACT ids you want active.' }],
+            isError: true,
+          };
+        }
+        const res = manager.setActive(setIds);
+        emitContextState(manager, context);
+        if (!res.ok) {
+          return {
+            content: [{ type: 'text', text: `Error: ${res.error}\n\nCurrent state:\n${renderContextPanel(manager)}` }],
+            isError: true,
+          };
+        }
+        const changed = res.changed ?? { opened: [], closed: [] };
+        return {
+          content: [{
+            type: 'text',
+            text:
+              `Set active set. Activated: ${changed.opened.join(', ') || '(none)'}. Deactivated: ${changed.closed.join(', ') || '(none)'}.\n` +
+              `Active [${manager.activeCount}/${manager.maxActive}]: ${manager.activeIds.join(', ') || '(none)'}.\n\n` +
+              `Updated sub-context panel:\n${renderContextPanel(manager)}`,
+          }],
+        };
+      }
+
+      if (action === 'swap') {
+        const deactIds = normIds(input.deactivateIds);
+        const actIds = ids.length > 0 ? ids : normIds(input.activateIds);
+        if (deactIds.length === 0 && actIds.length === 0) {
+          return {
+            content: [{ type: 'text', text: 'Error: swap needs deactivateIds and/or activateIds to change the active set.' }],
+            isError: true,
+          };
+        }
+        // Deactivate first so slots free up, then activate the new batch.
+        const deactRes = deactIds.map((id) => ({ id, r: manager.deactivate(id) }));
+        const actRes = actIds.map((id) => ({ id, r: manager.activate(id) }));
+        emitContextState(manager, context);
+        const failed = [...deactRes, ...actRes].filter((x) => !x.r.ok);
+        if (failed.length > 0) {
+          const errors = failed.map((x) => `${x.id}: ${(x.r as { error?: string }).error}`).join('\n');
+          return {
+            content: [{ type: 'text', text: `Error during swap:\n${errors}\n\nCurrent state:\n${renderContextPanel(manager)}` }],
+            isError: true,
+          };
+        }
+        manager.lastDelta = {
+          opened: actRes.filter((x) => x.r.ok && !manager.isMcpContext(x.id)).map((x) => x.id),
+          closed: deactRes.filter((x) => x.r.ok && !manager.isMcpContext(x.id)).map((x) => x.id),
+        };
+        return {
+          content: [{
+            type: 'text',
+            text:
+              `Swapped sub-contexts. Deactivated: ${deactIds.join(', ') || '(none)'}. Activated: ${actIds.join(', ') || '(none)'}.\n` +
+              `Active [${manager.activeCount}/${manager.maxActive}]: ${manager.activeIds.join(', ') || '(none)'}.\n\n` +
+              `Updated sub-context panel:\n${renderContextPanel(manager)}`,
+          }],
+        };
+      }
+
       if (action !== 'activate' && action !== 'deactivate') {
         return {
-          content: [{ type: 'text', text: 'Error: action must be "activate", "deactivate", or "list".' }],
+          content: [{ type: 'text', text: 'Error: action must be "activate", "deactivate", "swap", "set", or "list".' }],
           isError: true,
         };
       }
 
-      if (!contextId) {
+      if (ids.length === 0) {
         const allIds = [...ALL_SUBCONTEXTS, ...manager.registeredMcpIds].join(', ');
         return {
-          content: [{ type: 'text', text: `Error: contextId is required for ${action}. Available ids: ${allIds}.` }],
+          content: [{ type: 'text', text: `Error: contextId or contextIds is required for ${action}. Available ids: ${allIds}.` }],
           isError: true,
         };
       }
 
-      const result =
-        action === 'activate'
-          ? manager.activate(contextId)
-          : manager.deactivate(contextId);
+      const results = ids.map((id) => {
+        const r =
+          action === 'activate'
+            ? manager.activate(id)
+            : manager.deactivate(id);
+        return {
+          ok: r.ok,
+          error: r.error,
+          alreadyActive: Boolean((r as { alreadyActive?: boolean }).alreadyActive),
+          alreadyInactive: Boolean((r as { alreadyInactive?: boolean }).alreadyInactive),
+        };
+      });
 
-      // Stream state to the UI whether or not the mutation succeeded, so the
+      // Stream state to the UI whether or not the mutations succeeded, so the
       // panel always reflects reality after the agent reaches for a context.
       emitContextState(manager, context);
 
-      if (!result.ok) {
+      const failed = results.filter((r) => !r.ok);
+      if (failed.length > 0) {
+        const errors = results.map((r, i) => (r.ok ? null : `${ids[i]}: ${r.error}`)).filter(Boolean).join('\n');
         return {
-          content: [{ type: 'text', text: `Error: ${result.error}\n\nCurrent state:\n${renderContextPanel(manager)}` }],
+          content: [{ type: 'text', text: `Error: ${errors}\n\nCurrent state:\n${renderContextPanel(manager)}` }],
           isError: true,
         };
       }
 
+      const doneIds = ids.filter((_, i) => results[i].ok && !results[i].alreadyActive && !results[i].alreadyInactive && !manager.isMcpContext(ids[i]));
+      manager.lastDelta = action === 'activate'
+        ? { opened: doneIds, closed: [] }
+        : { opened: [], closed: doneIds };
+
       const verb = action === 'activate' ? 'ACTIVATED (loaded into context)' : 'DEACTIVATED (removed from context)';
+      const noOps = ids.filter((_, i) =>
+        action === 'activate' ? results[i].alreadyActive : results[i].alreadyInactive,
+      );
+      const noOpNote = noOps.length > 0
+        ? `\nNote: ${noOps.join(', ')} was already in the target state — no change needed.`
+        : '';
       return {
         content: [{
           type: 'text',
           text:
-            `Sub-context ${verb}: ${contextId}.\nActive [${manager.activeCount}/${manager.maxActive}]: ${manager.activeIds.join(', ') || '(none)'}.\n\n` +
+            `Sub-context ${verb}: ${ids.join(', ')}.${noOpNote}\nActive [${manager.activeCount}/${manager.maxActive}]: ${manager.activeIds.join(', ') || '(none)'}.\n\n` +
             `Updated sub-context panel:\n${renderContextPanel(manager)}`,
         }],
       };

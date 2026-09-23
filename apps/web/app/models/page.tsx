@@ -3,12 +3,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Cpu, Layers, Loader2, MessageSquare, Star, TriangleAlert, Zap } from 'lucide-react';
-import type { CatalogModel, ModelsResponseDto, ModelPreset, OmniRouteModelDto, OmniRouteStatusDto } from '@rag/contracts';
+import type {
+  CatalogModel,
+  ModelsResponseDto,
+  ModelPreset,
+  OmniRouteRankedResponseDto,
+  OmniRouteStatusDto,
+} from '@rag/contracts';
 import { api } from '../../lib/api';
 import { PageScroll } from '../../components/PageScroll';
 import { PageHeader } from '../../components/PageHeader';
 import { EmptyState } from '../../components/EmptyState';
-import { BrandIconFor } from '../../components/BrandIconResolver';
+import { BrandIconFor, resolveBrand } from '../../components/BrandIconResolver';
 import { cn } from '../../lib/utils';
 
 function Stars({ rating }: { rating: number }) {
@@ -30,6 +36,26 @@ function FreeBadge() {
       free
     </span>
   );
+}
+
+/** "5m ago" style relative time for cached health-check timestamps. */
+function fmtAgo(ts: number | null | undefined): string {
+  if (ts == null) return '—';
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  return `${Math.floor(m / 60)}h ${m % 60}m ago`;
+}
+
+/** "in 4m" style countdown until the next health inspection. */
+function fmtUntil(ts: number | null | undefined): string {
+  if (ts == null) return '—';
+  const s = Math.max(0, Math.floor((ts - Date.now()) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
 function ConfigCard({
@@ -69,7 +95,7 @@ export default function ModelsPage() {
   const router = useRouter();
   const [models, setModels] = useState<ModelsResponseDto | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [omniModels, setOmniModels] = useState<OmniRouteModelDto[]>([]);
+  const [omniModels, setOmniModels] = useState<OmniRouteRankedResponseDto | null>(null);
   const [omniStatus, setOmniStatus] = useState<OmniRouteStatusDto | null>(null);
 
   useEffect(() => {
@@ -91,13 +117,13 @@ export default function ModelsPage() {
         if (cancelled) return;
         setOmniStatus(s);
         if (s.ready) {
-          const res = await api.fetchOmniRouteModels();
-          if (!cancelled) setOmniModels(res.models);
+          const res = await api.fetchOmniRouteRanked();
+          if (!cancelled) setOmniModels(res);
         } else {
-          if (!cancelled) setOmniModels([]);
+          if (!cancelled) setOmniModels(null);
         }
       } catch {
-        if (!cancelled) setOmniModels([]);
+        if (!cancelled) setOmniModels(null);
       }
     };
     void check();
@@ -237,14 +263,31 @@ export default function ModelsPage() {
             )}
 
             <section className="space-y-3">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Zap className="h-4 w-4 text-warning" />
                 <h2 className="text-sm font-semibold uppercase tracking-widest text-ink-muted">
                   OmniRoute (free, keyless)
                 </h2>
-                {omniModels.length > 0 && (
+                {omniModels && (
                   <span className="rounded-full bg-surface-800 px-1.5 py-0.5 text-[10px] font-medium text-ink-secondary">
-                    {omniModels.length} models
+                    {omniModels.ranked.length} models
+                  </span>
+                )}
+                {omniModels && (
+                  <span
+                    className={cn(
+                      'rounded-full px-1.5 py-0.5 text-[10px] font-medium',
+                      omniModels.ranked.filter((m) => m.isAvailable).length > 0
+                        ? 'bg-success/10 text-success'
+                        : 'bg-warning/10 text-warning',
+                    )}
+                  >
+                    {omniModels.ranked.filter((m) => m.isAvailable).length} available
+                  </span>
+                )}
+                {omniModels?.updatedAt && (
+                  <span className="rounded-full bg-surface-850 px-1.5 py-0.5 text-[10px] tabular-nums text-ink-muted">
+                    checked {fmtAgo(omniModels.updatedAt)} · next in {fmtUntil(omniModels.nextCheckAt)}
                   </span>
                 )}
               </div>
@@ -275,20 +318,40 @@ export default function ModelsPage() {
                     No live OmniRoute models — is the gateway reachable on localhost:20128?
                   </p>
                 </div>
-              ) : omniModels.length > 0 ? (
+              ) : omniModels && omniModels.ranked.length > 0 ? (
                 <div className="card rounded-xl">
                   <div className="max-h-96 overflow-y-auto p-3">
                     <div className="flex flex-wrap gap-1.5">
-                      {omniModels.map((m) => (
+                      {omniModels.ranked.map((m) => (
                         <button
                           key={m.id}
                           type="button"
                           onClick={() =>
-                            router.push(`/chat?provider=omniroute&model=${encodeURIComponent(m.id)}`)
+                            router.push(`/agent?provider=omniroute&model=${encodeURIComponent(m.id)}`)
                           }
-                          title={`Use ${m.id} in chat`}
-                          className="group flex max-w-full items-center gap-1.5 rounded-md border border-surface-700 bg-surface-850 px-2 py-1 text-left font-mono text-[11px] text-ink-secondary transition-colors hover:border-primary/40 hover:text-white"
+                          title={`${m.id} — ${m.isAvailable ? 'available' : 'offline'}${m.latencyMs != null ? `, ${m.latencyMs}ms` : ''}${m.keyRequired ? ', needs API key' : ''}${m.lastError ? `, error: ${m.lastError}` : ''}`}
+                          className={cn(
+                            'group flex max-w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left font-mono text-[11px] transition-colors hover:border-primary/40',
+                            m.isAvailable
+                              ? 'border-surface-700 bg-surface-850 text-ink-secondary hover:text-white'
+                              : 'border-surface-800 bg-surface-900/60 text-ink-muted/70 hover:border-surface-600 hover:text-ink-muted',
+                          )}
                         >
+                          {(() => {
+                            const { Icon: MIcon, color } = resolveBrand(m.id);
+                            return (
+                              <MIcon
+                                className={cn('h-3 w-3 shrink-0', color)}
+                                aria-hidden="true"
+                              />
+                            );
+                          })()}
+                          <span
+                            className={cn(
+                              'h-1.5 w-1.5 shrink-0 rounded-full',
+                              m.isAvailable ? 'bg-emerald-400' : 'bg-slate-500',
+                            )}
+                          />
                           <span className="truncate">{m.id}</span>
                           <span
                             className={cn(
@@ -298,6 +361,16 @@ export default function ModelsPage() {
                           >
                             {m.isFree ? 'free' : 'keyless'}
                           </span>
+                          {m.keyRequired && (
+                            <span className="shrink-0 rounded-full bg-warning/10 px-1.5 py-0.5 text-[9px] font-medium text-warning">
+                              key
+                            </span>
+                          )}
+                          {m.checkedAt != null && (
+                            <span className="shrink-0 tabular-nums text-[9px] text-ink-muted">
+                              {m.isAvailable && m.latencyMs != null ? `${m.latencyMs}ms` : fmtAgo(m.checkedAt)}
+                            </span>
+                          )}
                         </button>
                       ))}
                     </div>
@@ -337,10 +410,14 @@ export default function ModelsPage() {
                       {p.models.map((m) => (
                         <span
                           key={m}
-                          className="max-w-full truncate rounded-md border border-surface-700 bg-surface-850 px-2 py-1 font-mono text-[11px] text-ink-secondary"
+                          className="flex max-w-full items-center gap-1.5 truncate rounded-md border border-surface-700 bg-surface-850 px-2 py-1 font-mono text-[11px] text-ink-secondary"
                           title={m}
                         >
-                          {m}
+                          {(() => {
+                            const { Icon: MIcon, color } = resolveBrand(m);
+                            return <MIcon className={cn('h-3 w-3 shrink-0', color)} aria-hidden="true" />;
+                          })()}
+                          <span className="truncate">{m}</span>
                         </span>
                       ))}
                     </div>

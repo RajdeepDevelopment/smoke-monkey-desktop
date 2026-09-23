@@ -13,6 +13,7 @@ export type RunStatus =
   | 'executing_tool'
   | 'waiting_permission'
   | 'waiting_user_input'
+  | 'waiting_mcp_approval'
   | 'recovering'
   | 'compacting'
   | 'completed'

@@ -31,7 +31,29 @@ if [ ! -d "$PROJECT_ROOT/node_modules" ]; then
   (cd "$PROJECT_ROOT" && pnpm install)
 fi
 
-echo "[install] building app (api-gateway, web, Rust release binary)..."
+echo "[install] shutting down stale Smoke Monkey / backend processes..."
+osascript -e "tell application \"Smoke Monkey Desktop\" to quit" >/dev/null 2>&1 || true
+for port in 8642 8643; do
+  pids="$(lsof -ti tcp:$port 2>/dev/null || true)"
+  if [ -n "$pids" ]; then
+    echo "[install]   killing stale process(es) on port $port: $pids"
+    kill $pids >/dev/null 2>&1 || true
+    sleep 1
+  fi
+done
+# Also kill any leftover node gateway/rag/omniroute scaffolding tied to this repo.
+pkill -f "api-gateway/dist/main.js" >/dev/null 2>&1 || true
+pkill -f "smoke-monkey-rag" >/dev/null 2>&1 || true
+sleep 1
+
+echo "[install] rebuilding api-gateway + web UI (fresh out/ + dist/)..."
+(cd "$PROJECT_ROOT/apps/api-gateway" && pnpm build)
+(cd "$PROJECT_ROOT/apps/web" && BUILD_FOR_DESKTOP=1 pnpm build)
+
+echo "[install] forcing tauri-build to re-embed the fresh web assets..."
+touch "$DESKTOP_DIR/src-tauri/build.rs"
+
+echo "[install] building app (Rust release binary)..."
 cd "$DESKTOP_DIR"
 if ! pnpm exec tauri build --no-bundle; then
   echo "[install] build failed - run from: apps/desktop" >&2

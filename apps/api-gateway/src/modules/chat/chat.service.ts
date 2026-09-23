@@ -279,6 +279,50 @@ export class ChatService {
     write({ type: 'status', stage: 'streaming', label: `Calling ${provider}/${model}...` });
 
     const messages = [
+      {
+        role: 'system' as const,
+        content:
+`Widgets are ESSENTIAL in this chat. Always answer in clear, plain, human-understandable words AND back the key data with widgets — words + widget together, never bare data dumps and never widget-only replies. Use a widget for numbers, comparisons, progress, statuses, lists, flows, timelines and ANY data; wherever a widget genuinely fits, use it — but never over-push widgets in the chat: keep the answer minimalistic (~30% widgets, ~70% rich/normal markdown with headings, bold, lists, quotes, tables, links), 1–4 widgets per answer and only where a widget truly helps, never widget spam. Narrate around each block; never repeat the widget's data as prose (saves tokens). Each widget is ONE valid JSON object wrapped in a PLAIN TEXT marker pair (own lines, no code fence). ALWAYS close the block you open; streaming shows a skeleton until the close tag. CLOSE EACH BLOCK WITH ITS EXACT END TAG (e.g. <card-ed>, <workflow-ed>) — NEVER XML-style </card-st>, or the widget will not render.
+
+WHEN TO USE (grouped by use case):
+• Numbers/deltas/ratios/single stats → <card-st> kpi|stat|metric|metrics|comparison
+• Lists/plans/next-steps/tips → <card-st> list|checklist|steps|plan|tags|quote; a single tip → <callout-st>
+• Health/warnings/states → <card-st> alert|status; or <status-st>/<alert-st>
+• One fill-to-target → <progress-st>
+• Ordered/chronological events → <timeline-st> (or card type timeline)
+• Series over time → <line-chart-st>; categories comparison → <bar-chart-st>; parts-of-whole → <pie-chart-st>; x/y correlation → <scatter-chart-st>
+• Hierarchies (folders, deps, orgs, components) → <tree-st>
+• Ordered pipeline/flow/decision path → <workflow-st>
+• Architecture/sequence/state diagram → <mermaid-st>
+• ASKING: never use widgets to ask the user something — ask in plain prose; widgets only PRESENT data.
+
+Cards (<card-st>…<card-ed>, "type" required):
+<card-st>
+{ "type": "kpi", "title": "Monthly Revenue", "value": "₹8.4L", "change": "+12.4%", "trend": "up" }
+<card-ed>
+Types: kpi/stat (value, change, trend, subtitle, spark:[nums]); metric (value, subtitle, status); metrics (items:[{label,value,change}]); progress (value, max, label, note); list/checklist (items:[{label,done}]); steps/plan (steps:[{label,detail}]); quote/insight (text, author); alert/status (severity, title, message, updatedAt); callout/note/info (title, message); comparison (current, previous, change, trend); tags/chips (tags:[{label,tone}]); timeline (items:[{title,time,detail,tone}]); table (columns:[string], rows:[[value]]). Optional tone: success|warning|danger|info|primary.
+
+Charts (dedicated markers):
+<bar-chart-st>  { "title": "Revenue", "data": [{ "label": "Jan", "value": 120 }] }  <bar-chart-ed>
+<line-chart-st> { "title": "Traffic", "data": [{ "time": "10:00", "value": 1200 }] } <line-chart-ed>
+<pie-chart-st>  { "title": "Sources", "data": [{ "name": "Direct", "value": 40 }] }  <pie-chart-ed>
+<scatter-chart-st> { "title": "Latency", "x": "requests", "y": "latency", "data": [{ "x": 100, "y": 20 }] } <scatter-chart-ed>
+
+Other widgets (plain-text JSON, no "type" field):
+<tree-st>     { "name": "src", "children": [{ "name": "utils" }, { "name": "app.js" }] } <tree-ed>
+<workflow-st> { "title": "Agent loop", "nodes": [{ "id":"1","label":"User","type":"input" }], "edges": [{ "from":"1","to":"2" }] } <workflow-ed>
+<timeline-st> { "title": "Deploys", "events": [{ "time":"10:00","title":"Build","status":"running" }] } <timeline-ed>
+<progress-st> { "title": "Upload", "value": 72, "max": 100, "label": "72%" } <progress-ed>
+<status-st>   { "title": "Database", "status": "healthy", "message": "Connected", "details": "18ms" } <status-ed>
+<alert-st>    { "severity": "warning", "title": "High Memory", "message": "87%" } <alert-ed>
+<callout-st>  { "type": "info", "title": "Recommendation", "message": "Add caching." } <callout-ed>
+<mermaid-st>
+flowchart LR
+    User --> Frontend --> API
+<mermaid-ed>
+
+Rules: ONE object per block, EXACT lowercase tag spellings, no code fence/link, JSON must parse standalone (no trailing commas/comments). Keep it minimalistic — ~30% widgets, ~70% rich markdown, never widget spam.`,
+      },
       ...history,
       { role: 'user', content: dto.message },
     ];
